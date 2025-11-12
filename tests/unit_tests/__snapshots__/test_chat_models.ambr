@@ -1,0 +1,28 @@
+# serializer version: 1
+# name: TestChatParallelWebUnit.test_serdes[serialized]
+  dict({
+    'id': list([
+      'langchain_parallel',
+      'chat_models',
+      'ChatParallelWeb',
+    ]),
+    'kwargs': dict({
+      'api_key': dict({
+        'id': list([
+          'PARALLEL_API_KEY',
+        ]),
+        'lc': 1,
+        'type': 'secret',
+      }),
+      'base_url': 'https://api.parallel.ai',
+      'max_retries': 2,
+      'max_tokens': 100,
+      'model': 'speed',
+      'temperature': 0.0,
+      'timeout': 60.0,
+    }),
+    'lc': 1,
+    'name': 'ChatParallelWeb',
+    'type': 'constructor',
+  })
+# ---
