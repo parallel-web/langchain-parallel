@@ -75,13 +75,13 @@ class ParallelExtractTool(BaseTool):
     Parallel Extract API.
 
     Setup:
-        Install ``langchain-parallel`` and set environment variable
-        ``PARALLEL_API_KEY``.
+        Install `langchain-parallel` and set environment variable
+        `PARALLEL_API_KEY`.
 
-        .. code-block:: bash
-
-            pip install -U langchain-parallel
-            export PARALLEL_API_KEY="your-api-key"
+        ```bash
+        pip install -U langchain-parallel
+        export PARALLEL_API_KEY="your-api-key"
+        ```
 
     Key init args:
         api_key: Optional[SecretStr]
@@ -93,35 +93,35 @@ class ParallelExtractTool(BaseTool):
             Maximum characters per extracted result.
 
     Instantiation:
-        .. code-block:: python
+        ```python
+        from langchain_parallel import ParallelExtractTool
 
-            from langchain_parallel import ParallelExtractTool
+        # Basic instantiation
+        tool = ParallelExtractTool()
 
-            # Basic instantiation
-            tool = ParallelExtractTool()
-
-            # With custom API key and parameters
-            tool = ParallelExtractTool(
-                api_key="your-api-key",
-                max_chars_per_extract=5000
-            )
+        # With custom API key and parameters
+        tool = ParallelExtractTool(
+            api_key="your-api-key",
+            max_chars_per_extract=5000
+        )
+        ```
 
     Invocation:
-        .. code-block:: python
+        ```python
+        # Extract content from URLs
+        result = tool.invoke({
+            "urls": [
+                "https://example.com/article1",
+                "https://example.com/article2"
+            ]
+        })
 
-            # Extract content from URLs
-            result = tool.invoke({
-                "urls": [
-                    "https://example.com/article1",
-                    "https://example.com/article2"
-                ]
-            })
-
-            # Result is a list of dicts with url, title, and content
-            for item in result:
-                print(f"Title: {item['title']}")
-                print(f"URL: {item['url']}")
-                print(f"Content: {item['content'][:200]}...")
+        # Result is a list of dicts with url, title, and content
+        for item in result:
+            print(f"Title: {item['title']}")
+            print(f"URL: {item['url']}")
+            print(f"Content: {item['content'][:200]}...")
+        ```
 
     Response Format:
         Returns a list of dictionaries, each containing:
