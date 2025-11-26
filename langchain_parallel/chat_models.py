@@ -132,13 +132,13 @@ class ChatParallelWeb(BaseChatModel):
     real-time web research capabilities through an OpenAI-compatible interface.
 
     Setup:
-        Install ``langchain-parallel`` and set environment variable
-        ``PARALLEL_API_KEY``.
+        Install `langchain-parallel` and set environment variable
+        `PARALLEL_API_KEY`.
 
-        .. code-block:: bash
-
-            pip install -U langchain-parallel
-            export PARALLEL_API_KEY="your-api-key"
+        ```bash
+        pip install -U langchain-parallel
+        export PARALLEL_API_KEY="your-api-key"
+        ```
 
     Key init args — completion params:
         model: str
@@ -160,62 +160,62 @@ class ChatParallelWeb(BaseChatModel):
             Base URL for Parallel API. Defaults to "https://api.parallel.ai".
 
     Instantiate:
-        .. code-block:: python
+        ```python
+        from langchain_parallel import ChatParallelWeb
 
-            from langchain_parallel import ChatParallelWeb
-
-            llm = ChatParallelWeb(
-                model="speed",
-                temperature=0.7,
-                max_tokens=None,
-                timeout=None,
-                max_retries=2,
-                # api_key="...",
-                # other params...
-            )
+        llm = ChatParallelWeb(
+            model="speed",
+            temperature=0.7,
+            max_tokens=None,
+            timeout=None,
+            max_retries=2,
+            # api_key="...",
+            # other params...
+        )
+        ```
 
     Invoke:
-        .. code-block:: python
-
-            messages = [
-                (
-                    "system",
-                    "You are a helpful assistant with access to real-time web "
-                    "information."
-                ),
-                ("human", "What are the latest developments in AI?"),
-            ]
-            llm.invoke(messages)
+        ```python
+        messages = [
+            (
+                "system",
+                "You are a helpful assistant with access to real-time web "
+                "information."
+            ),
+            ("human", "What are the latest developments in AI?"),
+        ]
+        llm.invoke(messages)
+        ```
 
     Stream:
-        .. code-block:: python
-
-            for chunk in llm.stream(messages):
-                print(chunk.content, end="")
+        ```python
+        for chunk in llm.stream(messages):
+            print(chunk.content, end="")
+        ```
 
     Async:
-        .. code-block:: python
+        ```python
+        await llm.ainvoke(messages)
 
-            await llm.ainvoke(messages)
+        # stream:
+        async for chunk in llm.astream(messages):
+            print(chunk.content, end="")
 
-            # stream:
-            async for chunk in llm.astream(messages):
-                print(chunk.content, end="")
-
-            # batch:
-            await llm.abatch([messages])
+        # batch:
+        await llm.abatch([messages])
+        ```
 
     Token usage:
-        .. code-block:: python
-
-            ai_msg = llm.invoke(messages)
-            ai_msg.usage_metadata
+        ```python
+        ai_msg = llm.invoke(messages)
+        ai_msg.usage_metadata
+        ```
 
     Response metadata:
-        .. code-block:: python
-
-            ai_msg = llm.invoke(messages)
-            ai_msg.response_metadata
+        ```python
+        ai_msg = llm.invoke(messages)
+        ai_msg.response_metadata
+        ```
 
     """
 

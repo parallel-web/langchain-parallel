@@ -84,13 +84,13 @@ class ParallelWebSearchTool(BaseTool):
     and metadata collection.
 
     Setup:
-        Install ``langchain-parallel`` and set environment variable
-        ``PARALLEL_API_KEY``.
+        Install `langchain-parallel` and set environment variable
+        `PARALLEL_API_KEY`.
 
-        .. code-block:: bash
-
-            pip install -U langchain-parallel
-            export PARALLEL_API_KEY="your-api-key"
+        ```bash
+        pip install -U langchain-parallel
+        export PARALLEL_API_KEY="your-api-key"
+        ```
 
     Key init args:
         api_key: Optional[SecretStr]
@@ -100,118 +100,118 @@ class ParallelWebSearchTool(BaseTool):
             Base URL for Parallel API. Defaults to "https://api.parallel.ai".
 
     Instantiation:
-        .. code-block:: python
+        ```python
+        from langchain_parallel import ParallelWebSearchTool
 
-            from langchain_parallel import ParallelWebSearchTool
+        # Basic instantiation
+        tool = ParallelWebSearchTool()
 
-            # Basic instantiation
-            tool = ParallelWebSearchTool()
-
-            # With custom API key
-            tool = ParallelWebSearchTool(api_key="your-api-key")
+        # With custom API key
+        tool = ParallelWebSearchTool(api_key="your-api-key")
+        ```
 
     Basic Usage:
-        .. code-block:: python
+        ```python
+        # Simple objective-based search
+        result = tool.invoke({
+            "objective": "What are the latest developments in AI?"
+        })
 
-            # Simple objective-based search
-            result = tool.invoke({
-                "objective": "What are the latest developments in AI?"
-            })
-
-            # Query-based search with multiple queries
-            result = tool.invoke({
-                "search_queries": [
-                    "latest AI developments 2024",
-                    "machine learning breakthroughs",
-                    "artificial intelligence news"
-                ],
-                "max_results": 10
-            })
+        # Query-based search with multiple queries
+        result = tool.invoke({
+            "search_queries": [
+                "latest AI developments 2024",
+                "machine learning breakthroughs",
+                "artificial intelligence news"
+            ],
+            "max_results": 10
+        })
+        ```
 
     Domain filtering and advanced options:
-        .. code-block:: python
+        ```python
+        # Domain filtering with fetch policy (using dict format)
+        result = tool.invoke({
+            "objective": "Recent climate change research",
+            "source_policy": {
+                "include_domains": ["nature.com", "science.org"],
+                "exclude_domains": ["reddit.com", "twitter.com"]
+            },
+            "max_results": 15,
+            "excerpts": {"max_chars_per_result": 2000},  # Auto-converted
+            "mode": "one-shot",  # Use 'agentic' for token-efficient results
+            "fetch_policy": {  # Auto-converted to FetchPolicy
+                "max_age_seconds": 86400,  # 1 day cache
+                "timeout_seconds": 60
+            },
+            "include_metadata": True
+        })
 
-            # Domain filtering with fetch policy (using dict format)
-            result = tool.invoke({
-                "objective": "Recent climate change research",
-                "source_policy": {
-                    "include_domains": ["nature.com", "science.org"],
-                    "exclude_domains": ["reddit.com", "twitter.com"]
-                },
-                "max_results": 15,
-                "excerpts": {"max_chars_per_result": 2000},  # Auto-converted
-                "mode": "one-shot",  # Use 'agentic' for token-efficient results
-                "fetch_policy": {  # Auto-converted to FetchPolicy
-                    "max_age_seconds": 86400,  # 1 day cache
-                    "timeout_seconds": 60
-                },
-                "include_metadata": True
-            })
+        # Or use the types directly
+        from langchain_parallel import ExcerptSettings, FetchPolicy
 
-            # Or use the types directly
-            from langchain_parallel import ExcerptSettings, FetchPolicy
-
-            result = tool.invoke({
-                "objective": "Recent climate change research",
-                "excerpts": ExcerptSettings(max_chars_per_result=2000),
-                "fetch_policy": FetchPolicy(max_age_seconds=86400, timeout_seconds=60),
-            })
+        result = tool.invoke({
+            "objective": "Recent climate change research",
+            "excerpts": ExcerptSettings(max_chars_per_result=2000),
+            "fetch_policy": FetchPolicy(max_age_seconds=86400, timeout_seconds=60),
+        })
+        ```
 
     Async Usage:
-        .. code-block:: python
+        ```python
+        import asyncio
 
-            import asyncio
+        async def search_async():
+            result = await tool.ainvoke({
+                "objective": "Latest tech news"
+            })
+            return result
 
-            async def search_async():
-                result = await tool.ainvoke({
-                    "objective": "Latest tech news"
-                })
-                return result
-
-            result = asyncio.run(search_async())
+        result = asyncio.run(search_async())
+        ```
 
     Response Format:
-        .. code-block:: python
-
-            {
-                "search_id": "search_abc123...",
-                "results": [
-                    {
-                        "url": "https://example.com/article",
-                        "title": "Article Title",
-                        "excerpts": [
-                            "Relevant excerpt from the page...",
-                            "Another important section..."
-                        ]
-                    }
-                ],
-                "search_metadata": {
-                    "search_duration_seconds": 2.451,
-                    "search_timestamp": "2024-01-15T10:30:00",
-                    "max_results_requested": 10,
-                    "actual_results_returned": 8,
-                    "search_id": "search_abc123...",
-                    "query_count": 3,
-                    "queries_used": ["query1", "query2", "query3"],
-                    "source_policy_applied": true,
-                    "included_domains": ["nature.com"],
-                    "excluded_domains": ["reddit.com"]
+        ```python
+        {
+            "search_id": "search_abc123...",
+            "results": [
+                {
+                    "url": "https://example.com/article",
+                    "title": "Article Title",
+                    "excerpts": [
+                        "Relevant excerpt from the page...",
+                        "Another important section..."
+                    ]
                 }
+            ],
+            "search_metadata": {
+                "search_duration_seconds": 2.451,
+                "search_timestamp": "2024-01-15T10:30:00",
+                "max_results_requested": 10,
+                "actual_results_returned": 8,
+                "search_id": "search_abc123...",
+                "query_count": 3,
+                "queries_used": ["query1", "query2", "query3"],
+                "source_policy_applied": true,
+                "included_domains": ["nature.com"],
+                "excluded_domains": ["reddit.com"]
             }
+        }
+        ```
 
     Tool Calling Integration:
-        .. code-block:: python
+        ```python
+        # When used with LangChain agents or chat models with tool calling
+        from langchain_core.messages import HumanMessage
+        from langchain_parallel import ChatParallelWeb
 
-            # When used with LangChain agents or chat models with tool calling
-            from langchain_core.messages import HumanMessage
-            from langchain_parallel import ChatParallelWeb
+        chat = ChatParallelWeb()
+        chat_with_tools = chat.bind_tools([tool])
 
-            chat = ChatParallelWeb()
-            chat_with_tools = chat.bind_tools([tool])
-
-            response = chat_with_tools.invoke([
-                HumanMessage(content="Search for the latest AI research papers")
-            ])
+        response = chat_with_tools.invoke([
+            HumanMessage(content="Search for the latest AI research papers")
+        ])
+        ```
 
     Best Practices:
         - Use specific objectives for better results

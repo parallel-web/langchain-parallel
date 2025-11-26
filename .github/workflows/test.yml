@@ -1,0 +1,76 @@
+name: Unit Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  check-permissions:
+    runs-on: ubuntu-latest
+    outputs:
+      can-run: ${{ steps.check.outputs.can-run }}
+    steps:
+      - name: Check if user can run tests
+        id: check
+        run: |
+          # Check if PR author is owner, member, or collaborator
+          if [[ "${{ github.event.pull_request.author_association }}" == "OWNER" ]] || \
+             [[ "${{ github.event.pull_request.author_association }}" == "MEMBER" ]] || \
+             [[ "${{ github.event.pull_request.author_association }}" == "COLLABORATOR" ]]; then
+            echo "can-run=true" >> $GITHUB_OUTPUT
+            echo "✅ User has permission to run tests"
+          else
+            echo "can-run=false" >> $GITHUB_OUTPUT
+            echo "❌ User does not have permission to run tests"
+            echo "Only repository owners, members, and collaborators can run tests"
+          fi
+
+  test:
+    needs: check-permissions
+    if: needs.check-permissions.outputs.can-run == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'poetry'
+
+      - name: Install dependencies
+        run: |
+          poetry env use python${{ matrix.python-version }}
+          poetry install --with test,lint,typing
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: |
+            .coverage
+            htmlcov/
+          retention-days: 7
+
+  test-status:
+    needs: check-permissions
+    if: needs.check-permissions.outputs.can-run == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tests skipped
+        run: |
+          echo "::warning::Tests were not run because the PR author (${{ github.event.pull_request.user.login }}) is not a repository owner, member, or collaborator."
+          echo "Repository owners can manually trigger tests by re-running this workflow."

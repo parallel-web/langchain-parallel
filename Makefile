@@ -1,7 +1,15 @@
-.PHONY: all format lint test tests integration_tests docker_tests help extended_tests
+.PHONY: all format lint test tests integration_tests docker_tests help extended_tests install
 
 # Default target executed when no arguments are given to make.
 all: help
+
+######################
+# INSTALLATION
+######################
+
+install:
+	poetry env use python3.12
+	poetry install --with test,lint,typing
 
 # Define a variable for the test file path.
 TEST_FILE ?= tests/unit_tests/
@@ -56,6 +64,7 @@ check_imports: $(shell find langchain_parallel -name '*.py')
 
 help:
 	@echo '----'
+	@echo 'install                      - set up Python 3.12 environment and install dependencies'
 	@echo 'check_imports				- check imports'
 	@echo 'format                       - run code formatters'
 	@echo 'lint                         - run linters'
