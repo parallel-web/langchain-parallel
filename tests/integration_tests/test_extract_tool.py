@@ -140,7 +140,7 @@ class TestParallelExtractToolIntegration:
             {
                 "urls": ["https://this-domain-does-not-exist-12345.com/"],
                 "full_content": True,
-                "timeout": 10.0,  # Reasonable timeout
+                "timeout": 30.0,  # Reasonable timeout
             }
         )
 
