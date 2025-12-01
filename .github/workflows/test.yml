@@ -14,16 +14,19 @@ jobs:
       - name: Check if user can run tests
         id: check
         run: |
-          # Check if PR author is owner, member, or collaborator
-          if [[ "${{ github.event.pull_request.author_association }}" == "OWNER" ]] || \
-             [[ "${{ github.event.pull_request.author_association }}" == "MEMBER" ]] || \
-             [[ "${{ github.event.pull_request.author_association }}" == "COLLABORATOR" ]]; then
+          ASSOCIATION="${{ github.event.pull_request.author_association }}"
+          echo "PR author association: $ASSOCIATION"
+
+          # Check if PR author is owner, member, collaborator, or contributor
+          if [[ "$ASSOCIATION" == "OWNER" ]] || \
+             [[ "$ASSOCIATION" == "MEMBER" ]] || \
+             [[ "$ASSOCIATION" == "COLLABORATOR" ]] || \
+             [[ "$ASSOCIATION" == "CONTRIBUTOR" ]]; then
             echo "can-run=true" >> $GITHUB_OUTPUT
             echo "✅ User has permission to run tests"
           else
             echo "can-run=false" >> $GITHUB_OUTPUT
-            echo "❌ User does not have permission to run tests"
-            echo "Only repository owners, members, and collaborators can run tests"
+            echo "❌ User does not have permission to run tests (association: $ASSOCIATION)"
           fi
 
   test:
