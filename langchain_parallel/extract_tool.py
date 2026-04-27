@@ -332,6 +332,27 @@ class ParallelExtractTool(BaseTool):
             kwargs["timeout"] = timeout
         return kwargs
 
+    @staticmethod
+    def _start_text(urls: list[str], *, async_: bool) -> str:
+        """Build the run-manager start-of-extraction log message."""
+        prefix = (
+            "Starting async content extraction from"
+            if async_
+            else "Starting content extraction from"
+        )
+        count = len(urls)
+        return f"{prefix} {count} URL{'' if count == 1 else 's'}\n"
+
+    @staticmethod
+    def _completion_text(formatted: list[dict[str, Any]], *, async_: bool) -> str:
+        """Build the run-manager end-of-extraction log message."""
+        prefix = "Async extraction completed" if async_ else "Extraction completed"
+        success = sum(1 for item in formatted if "error_type" not in item)
+        errors = len(formatted) - success
+        if errors:
+            return f"{prefix}: {success} succeeded, {errors} failed\n"
+        return f"{prefix}: {success} URL{'' if success == 1 else 's'} processed\n"
+
     def _run(
         self,
         urls: list[str],
@@ -352,12 +373,7 @@ class ParallelExtractTool(BaseTool):
             raise RuntimeError(msg)
 
         if run_manager:
-            count = len(urls)
-            run_manager.on_text(
-                f"Starting content extraction from {count} URL"
-                f"{'' if count == 1 else 's'}\n",
-                color="blue",
-            )
+            run_manager.on_text(self._start_text(urls, async_=False), color="blue")
 
         kwargs = self._build_call_kwargs(
             urls=urls,
@@ -381,21 +397,11 @@ class ParallelExtractTool(BaseTool):
             raise ValueError(msg) from e
 
         formatted = self._format_response(response_obj.model_dump())
-
         if run_manager:
-            success_count = sum(1 for item in formatted if "error_type" not in item)
-            error_count = len(formatted) - success_count
             run_manager.on_text(
-                (
-                    f"Extraction completed: {success_count} succeeded, "
-                    f"{error_count} failed\n"
-                    if error_count
-                    else f"Extraction completed: {success_count} URL"
-                    f"{'' if success_count == 1 else 's'} processed\n"
-                ),
+                self._completion_text(formatted, async_=False),
                 color="green",
             )
-
         return formatted
 
     async def _arun(
@@ -418,10 +424,8 @@ class ParallelExtractTool(BaseTool):
             raise RuntimeError(msg)
 
         if run_manager:
-            count = len(urls)
             await run_manager.on_text(
-                f"Starting async content extraction from {count} URL"
-                f"{'' if count == 1 else 's'}\n",
+                self._start_text(urls, async_=True),
                 color="blue",
             )
 
@@ -450,19 +454,9 @@ class ParallelExtractTool(BaseTool):
             raise ValueError(msg) from e
 
         formatted = self._format_response(response_obj.model_dump())
-
         if run_manager:
-            success_count = sum(1 for item in formatted if "error_type" not in item)
-            error_count = len(formatted) - success_count
             await run_manager.on_text(
-                (
-                    f"Async extraction completed: {success_count} succeeded, "
-                    f"{error_count} failed\n"
-                    if error_count
-                    else f"Async extraction completed: {success_count} URL"
-                    f"{'' if success_count == 1 else 's'} processed\n"
-                ),
+                self._completion_text(formatted, async_=True),
                 color="green",
             )
-
         return formatted

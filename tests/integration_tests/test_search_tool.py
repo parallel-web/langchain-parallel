@@ -23,6 +23,10 @@ class TestParallelWebSearchToolIntegration(ToolsIntegrationTests):
         have {"name", "id", "args"} keys.
         """
         return {
-            "objective": "What are the latest developments in AI?",
+            "search_queries": [
+                "latest AI developments",
+                "AI breakthroughs 2026",
+            ],
+            "objective": "Latest developments in AI",
             "max_results": 3,
         }

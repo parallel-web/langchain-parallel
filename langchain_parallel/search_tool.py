@@ -90,13 +90,11 @@ class ParallelWebSearchInput(BaseModel):
             "alongside `search_queries` for best results."
         ),
     )
-    search_queries: Optional[list[str]] = Field(
-        default=None,
+    search_queries: list[str] = Field(
         description=(
-            "List of keyword search queries to guide the search. Maximum 5 "
-            "queries, each up to 200 characters (3-6 words works best). "
-            "Required for the GA endpoint; if only `objective` is provided, "
-            "the call falls back to the deprecated v1beta endpoint."
+            "Required. 1-5 keyword search queries (3-6 words each, up to "
+            "200 characters). Pair with an optional `objective` for best "
+            "results."
         ),
     )
     max_results: int = Field(
@@ -253,7 +251,6 @@ class ParallelWebSearchTool(BaseTool):
             "search_metadata": {  # added by this tool when include_metadata=True
                 "search_duration_seconds": 2.451,
                 "search_timestamp": "2026-04-27T10:30:00",
-                "endpoint": "v1",
                 "actual_results_returned": 5,
             }
         }
@@ -303,7 +300,6 @@ class ParallelWebSearchTool(BaseTool):
         self,
         *,
         start_time: datetime,
-        endpoint: str,
         response: dict[str, Any],
     ) -> dict[str, Any]:
         """Build client-side timing/result metadata."""
@@ -314,7 +310,6 @@ class ParallelWebSearchTool(BaseTool):
                 3,
             ),
             "search_timestamp": start_time.isoformat(),
-            "endpoint": endpoint,
             "actual_results_returned": len(response.get("results") or []),
         }
 
@@ -333,10 +328,16 @@ class ParallelWebSearchTool(BaseTool):
         max_results: int,
         location: Optional[str],
         timeout: Optional[int],
-    ) -> tuple[str, dict[str, Any]]:
-        """Resolve params + endpoint (v1 GA vs v1beta fallback)."""
-        if not objective and not search_queries:
-            msg = "Either 'objective' or 'search_queries' must be provided."
+    ) -> dict[str, Any]:
+        """Resolve params into the GA `client.search(...)` kwargs shape."""
+        if not search_queries:
+            msg = (
+                "search_queries is required (1-5 keyword strings, 3-6 words "
+                "each). Pass at least one query; pair with an optional "
+                "`objective` for best results. See "
+                "https://docs.parallel.ai/search/search-migration-guide for "
+                "migrating from the pre-GA objective-only call shape."
+            )
             raise ValueError(msg)
 
         normalized_mode = _normalize_mode(mode)
@@ -348,40 +349,7 @@ class ParallelWebSearchTool(BaseTool):
             location=location,
         )
 
-        if not search_queries:
-            warnings.warn(
-                "Calling Parallel Search without 'search_queries' falls back "
-                "to the deprecated v1beta endpoint. Provide search_queries "
-                "(1-5 keyword strings) to use the GA endpoint.",
-                DeprecationWarning,
-                stacklevel=4,
-            )
-            kwargs: dict[str, Any] = {
-                "objective": objective,
-                "max_results": max_results,
-            }
-            if excerpts is not None:
-                kwargs["excerpts"] = excerpts.model_dump(exclude_none=True)
-            if fetch_policy is not None:
-                kwargs["fetch_policy"] = fetch_policy.model_dump(exclude_none=True)
-            sp = _coerce_source_policy(source_policy)
-            if sp:
-                kwargs["source_policy"] = sp
-            if normalized_mode is not None:
-                kwargs["mode"] = (
-                    "agentic" if normalized_mode == "advanced" else "one-shot"
-                )
-            if client_model is not None:
-                kwargs["client_model"] = client_model
-            if session_id is not None:
-                kwargs["session_id"] = session_id
-            if location is not None:
-                kwargs["location"] = location
-            if timeout is not None:
-                kwargs["timeout"] = timeout
-            return "v1beta", kwargs
-
-        kwargs = {"search_queries": list(search_queries)}
+        kwargs: dict[str, Any] = {"search_queries": list(search_queries)}
         if objective is not None:
             kwargs["objective"] = objective
         if normalized_mode is not None:
@@ -396,7 +364,40 @@ class ParallelWebSearchTool(BaseTool):
             kwargs["advanced_settings"] = advanced_settings
         if timeout is not None:
             kwargs["timeout"] = timeout
-        return "v1", kwargs
+        return kwargs
+
+    def _finalize_response(
+        self,
+        response_obj: Any,
+        *,
+        start_time: datetime,
+        include_metadata: bool,
+    ) -> dict[str, Any]:
+        """Convert SDK response to dict and attach client-side metadata."""
+        response: dict[str, Any] = response_obj.model_dump()
+        if include_metadata:
+            response["search_metadata"] = self._build_metadata(
+                start_time=start_time,
+                response=response,
+            )
+        return response
+
+    @staticmethod
+    def _start_text(
+        objective: Optional[str], search_queries: Optional[list[str]], *, async_: bool
+    ) -> str:
+        """Build the run-manager start-of-search log message."""
+        prefix = "Starting async web search" if async_ else "Starting web search"
+        query_desc = objective or f"{len(search_queries or [])} search queries"
+        return f"{prefix}: {query_desc}\n"
+
+    @staticmethod
+    def _completion_text(response: dict[str, Any], *, async_: bool) -> str:
+        """Build the run-manager end-of-search log message."""
+        prefix = "Async search completed" if async_ else "Search completed"
+        count = len(response.get("results") or [])
+        duration = response.get("search_metadata", {}).get("search_duration_seconds", 0)
+        return f"{prefix}: {count} results in {duration}s\n"
 
     def _run(
         self,
@@ -423,10 +424,12 @@ class ParallelWebSearchTool(BaseTool):
 
         start_time = datetime.now()
         if run_manager:
-            query_desc = objective or f"{len(search_queries or [])} search queries"
-            run_manager.on_text(f"Starting web search: {query_desc}\n", color="blue")
+            run_manager.on_text(
+                self._start_text(objective, search_queries, async_=False),
+                color="blue",
+            )
 
-        endpoint, kwargs = self._build_call_kwargs(
+        kwargs = self._build_call_kwargs(
             objective=objective,
             search_queries=search_queries,
             mode=mode,
@@ -442,35 +445,23 @@ class ParallelWebSearchTool(BaseTool):
         )
 
         try:
-            response_obj: Any = (
-                self._client.search(**kwargs)
-                if endpoint == "v1"
-                else self._client.beta.search(**kwargs)
-            )
+            response_obj = self._client.search(**kwargs)
         except Exception as e:
             if run_manager:
                 run_manager.on_text(f"Search failed: {e!s}\n", color="red")
             msg = f"Error calling Parallel Search API: {e!s}"
             raise ValueError(msg) from e
 
-        response: dict[str, Any] = response_obj.model_dump()
-        if include_metadata:
-            response["search_metadata"] = self._build_metadata(
-                start_time=start_time,
-                endpoint=endpoint,
-                response=response,
-            )
-
+        response = self._finalize_response(
+            response_obj,
+            start_time=start_time,
+            include_metadata=include_metadata,
+        )
         if run_manager:
-            count = len(response.get("results") or [])
-            duration = response.get("search_metadata", {}).get(
-                "search_duration_seconds", 0
-            )
             run_manager.on_text(
-                f"Search completed: {count} results in {duration}s\n",
+                self._completion_text(response, async_=False),
                 color="green",
             )
-
         return response
 
     async def _arun(
@@ -498,13 +489,12 @@ class ParallelWebSearchTool(BaseTool):
 
         start_time = datetime.now()
         if run_manager:
-            query_desc = objective or f"{len(search_queries or [])} search queries"
             await run_manager.on_text(
-                f"Starting async web search: {query_desc}\n",
+                self._start_text(objective, search_queries, async_=True),
                 color="blue",
             )
 
-        endpoint, kwargs = self._build_call_kwargs(
+        kwargs = self._build_call_kwargs(
             objective=objective,
             search_queries=search_queries,
             mode=mode,
@@ -520,11 +510,7 @@ class ParallelWebSearchTool(BaseTool):
         )
 
         try:
-            response_obj: Any = (
-                await self._async_client.search(**kwargs)
-                if endpoint == "v1"
-                else await self._async_client.beta.search(**kwargs)
-            )
+            response_obj = await self._async_client.search(**kwargs)
         except Exception as e:
             if run_manager:
                 await run_manager.on_text(
@@ -534,22 +520,21 @@ class ParallelWebSearchTool(BaseTool):
             msg = f"Error calling Parallel Search API: {e!s}"
             raise ValueError(msg) from e
 
-        response: dict[str, Any] = response_obj.model_dump()
-        if include_metadata:
-            response["search_metadata"] = self._build_metadata(
-                start_time=start_time,
-                endpoint=endpoint,
-                response=response,
-            )
-
+        response = self._finalize_response(
+            response_obj,
+            start_time=start_time,
+            include_metadata=include_metadata,
+        )
         if run_manager:
-            count = len(response.get("results") or [])
-            duration = response.get("search_metadata", {}).get(
-                "search_duration_seconds", 0
-            )
             await run_manager.on_text(
-                f"Async search completed: {count} results in {duration}s\n",
+                self._completion_text(response, async_=True),
                 color="green",
             )
-
         return response
+
+
+#: Forward-compat alias for :class:`ParallelWebSearchTool`.
+#:
+#: Prefer ParallelSearchTool in new code; ParallelWebSearchTool will
+#: continue to work indefinitely as an alias for this class.
+ParallelSearchTool = ParallelWebSearchTool

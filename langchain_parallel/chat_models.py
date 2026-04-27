@@ -732,3 +732,10 @@ class ChatParallelWeb(BaseChatModel):
 
             return bound | _parse_with_capture
         return bound | output_parser
+
+
+#: Forward-compat alias for :class:`ChatParallelWeb`.
+#:
+#: Prefer ChatParallel in new code; ChatParallelWeb will continue to
+#: work indefinitely as an alias for this class.
+ChatParallel = ChatParallelWeb

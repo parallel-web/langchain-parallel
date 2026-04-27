@@ -299,6 +299,13 @@ class TestChatParallelWebDirect:
         assert result["parsed"].name == "Elon Musk"
         assert result["parsing_error"] is None
 
+    def test_chat_parallel_is_alias_of_chat_parallel_web(self) -> None:
+        """``ChatParallel`` is the new canonical name; old name still works."""
+        from langchain_parallel import ChatParallel, ChatParallelWeb
+
+        assert ChatParallel is ChatParallelWeb
+        assert ChatParallel(model="lite", api_key=_TEST_KEY).model == "lite"
+
     def test_response_metadata_stream_chunk_includes_basis(self) -> None:
         """Streaming chunks expose basis on the last chunk."""
         chat = ChatParallelWeb(model="lite", api_key=_TEST_KEY)

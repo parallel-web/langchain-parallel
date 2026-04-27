@@ -4,13 +4,14 @@ This package provides LangChain integrations for [Parallel](https://docs.paralle
 
 ## Features
 
-- **Chat Models**: `ChatParallelWeb` - Real-time web research chat completions
-- **Search Tools**: `ParallelWebSearchTool` - Direct access to Parallel's Search API
-- **Extract Tools**: `ParallelExtractTool` - Clean content extraction from web pages
-- **Streaming Support**: Real-time response streaming
-- **Async/Await**: Full asynchronous operation support
-- **OpenAI Compatible**: Uses familiar OpenAI SDK patterns
-- **LangChain Integration**: Seamless integration with LangChain ecosystem
+- **Chat Models**: `ChatParallel` (formerly `ChatParallelWeb`) — real-time web research chat completions, with citations and structured output on the research models.
+- **Search Tool**: `ParallelSearchTool` (formerly `ParallelWebSearchTool`) — direct access to Parallel's GA `/v1/search` endpoint.
+- **Extract Tool**: `ParallelExtractTool` — clean content extraction from web pages via `/v1/extract`.
+- **Streaming Support**: Real-time response streaming on chat.
+- **Async/Await**: Full asynchronous operation support.
+- **LangChain Integration**: Pydantic input schemas, `bind`-able tools, `with_structured_output()`, `lc_serializable`.
+
+> Note: the older names (`ChatParallelWeb`, `ParallelWebSearchTool`) continue to work as aliases.
 
 ## Installation
 
@@ -214,7 +215,7 @@ for r in result["results"]:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `objective` | `Optional[str]` | `None` | Natural-language description of research goal (≤5000 chars). |
-| `search_queries` | `Optional[List[str]]` | `None` | Keyword queries (max 5, 200 chars each). Required for the GA endpoint; without it, calls fall back to `/v1beta` with a deprecation warning. |
+| `search_queries` | `List[str]` | Required | 1-5 keyword queries (3-6 words each, ≤200 chars). Pair with an optional `objective` for best results. |
 | `max_results` | `int` | `10` | Maximum results to return (1–40). |
 | `excerpts` | `Optional[ExcerptSettings]` | `None` | Per-result excerpt-size cap. |
 | `max_chars_total` | `Optional[int]` | `None` | Cap on total excerpt characters across all results. |
