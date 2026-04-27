@@ -118,7 +118,11 @@ convention = "google"
 ]
 "examples/*.py" = ["T201"] # Allow print statements in examples
 "docs/*.ipynb" = ["T201", "E501"] # Allow print statements and long lines in documentation
-"scripts/*.py" = ["SIM105", "S110"] # Allow try-except-pass in scripts
+"scripts/*.py" = [
+    "SIM105", # Allow try-except-pass in scripts
+    "S110",
+    "T201",   # Allow print statements in scripts
+]
 "langchain_parallel/extract_tool.py" = [
     "FBT001", # Boolean-typed positional argument (matches Extract API design)
     "FBT002", # Boolean default positional argument (matches Extract API design)

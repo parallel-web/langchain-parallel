@@ -63,8 +63,8 @@ if __name__ == "__main__":
             load_module_with_deps(file, loaded_modules)
         except Exception:
             has_failure = True
-            print(file)  # noqa: T201
+            print(file)
             traceback.print_exc()
-            print()  # noqa: T201
+            print()
 
     sys.exit(1 if has_failure else 0)

@@ -7,7 +7,7 @@ import os
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from langchain_parallel import ChatParallelWeb
+from langchain_parallel import ChatParallel
 
 # Set your API key: export PARALLEL_API_KEY="your-api-key"
 
@@ -16,12 +16,10 @@ def basic_example() -> None:
     """Basic synchronous chat example."""
     print("=== Basic Chat Example ===")
 
-    # Initialize the chat model
-    chat = ChatParallelWeb(
-        model_name="speed",  # Parallel's chat model
-        temperature=0.7,  # Optional: temperature (ignored by Parallel)
-        max_tokens=None,  # Optional: max tokens (ignored by Parallel)
-    )
+    # Initialize the chat model. Models: "speed" (default, fast),
+    # "lite" / "base" / "core" (research models with web citations
+    # in `response_metadata["basis"]` and structured-output support).
+    chat = ChatParallel(model="speed")
 
     # Create messages
     messages = [
@@ -57,7 +55,7 @@ def streaming_example() -> None:
     """Streaming example for real-time responses."""
     print("\n=== Streaming Chat Example ===")
 
-    chat = ChatParallelWeb()
+    chat = ChatParallel()
 
     messages = [
         SystemMessage(content="You are a creative writing assistant."),
@@ -86,7 +84,7 @@ async def async_example() -> None:
     """Asynchronous example."""
     print("\n=== Async Chat Example ===")
 
-    chat = ChatParallelWeb()
+    chat = ChatParallel()
 
     messages = [
         SystemMessage(content="You are a technology expert."),
@@ -121,7 +119,7 @@ def conversation_example() -> None:
     """Example of maintaining conversation context."""
     print("\n=== Conversation Example ===")
 
-    chat = ChatParallelWeb()
+    chat = ChatParallel()
 
     # Start with system message
     messages: list[BaseMessage] = [
