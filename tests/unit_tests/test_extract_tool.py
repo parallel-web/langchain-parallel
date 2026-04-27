@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from langchain_parallel._types import ExcerptSettings, FetchPolicy, FullContentSettings
 from langchain_parallel.extract_tool import ParallelExtractTool
 
 
@@ -27,16 +28,13 @@ class TestParallelExtractTool:
             assert tool.name == "parallel_extract"
             assert tool.base_url == "https://api.parallel.ai"
             assert tool.max_chars_per_extract is None
-            assert tool.response_format == "content_and_artifact"
 
     def test_extract_tool_initialization_with_params(self) -> None:
         """Test extract tool initialization with custom parameters."""
         with patch(
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
-            tool = ParallelExtractTool(
-                max_chars_per_extract=3000,
-            )
+            tool = ParallelExtractTool(max_chars_per_extract=3000)
             assert tool.max_chars_per_extract == 3000
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
@@ -46,7 +44,7 @@ class TestParallelExtractTool:
         mock_async_factory: Mock,
         mock_sync_factory: Mock,
     ) -> None:
-        """Test extracting content from a single URL via the GA endpoint."""
+        """Single URL hits the GA endpoint and returns a list of dicts."""
         sync_client = Mock()
         sync_client.extract.return_value = _make_response(
             {
@@ -69,18 +67,16 @@ class TestParallelExtractTool:
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelExtractTool()
-            content, artifact = tool._run(
-                urls=["https://example.com"], full_content=True
-            )
+            result = tool._run(urls=["https://example.com"], full_content=True)
 
             sync_client.extract.assert_called_once()
             sync_client.beta.extract.assert_not_called()
-            assert len(artifact) == 1
-            assert artifact[0]["url"] == "https://example.com"
-            assert artifact[0]["title"] == "Test Article"
-            assert artifact[0]["content"] == "This is the extracted content."
-            assert artifact[0]["publish_date"] == "2024-01-01"
-            assert "Test Article" in content
+            assert isinstance(result, list)
+            assert len(result) == 1
+            assert result[0]["url"] == "https://example.com"
+            assert result[0]["title"] == "Test Article"
+            assert result[0]["content"] == "This is the extracted content."
+            assert result[0]["publish_date"] == "2024-01-01"
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")
@@ -116,11 +112,11 @@ class TestParallelExtractTool:
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelExtractTool()
-            _, artifact = tool._run(
+            result = tool._run(
                 urls=["https://example1.com", "https://example2.com"],
                 full_content=True,
             )
-            assert [r["content"] for r in artifact] == ["Content 1", "Content 2"]
+            assert [r["content"] for r in result] == ["Content 1", "Content 2"]
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")
@@ -158,19 +154,19 @@ class TestParallelExtractTool:
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelExtractTool()
-            _, artifact = tool._run(
+            result = tool._run(
                 urls=["https://example1.com", "https://example2.com"],
                 full_content=True,
             )
-            assert len(artifact) == 2
-            assert artifact[0]["content"] == "Content 1"
-            assert artifact[1]["error_type"] == "http_error"
-            assert artifact[1]["http_status_code"] == 404
-            assert "Error: http_error" in artifact[1]["content"]
+            assert len(result) == 2
+            assert result[0]["content"] == "Content 1"
+            assert result[1]["error_type"] == "http_error"
+            assert result[1]["http_status_code"] == 404
+            assert "Error: http_error" in result[1]["content"]
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")
-    def test_extract_max_chars_default(
+    def test_full_content_precedence_tool_level_default(
         self,
         mock_async_factory: Mock,
         mock_sync_factory: Mock,
@@ -200,8 +196,171 @@ class TestParallelExtractTool:
             tool._run(urls=["https://example.com"], full_content=True)
             kwargs = sync_client.extract.call_args.kwargs
             assert kwargs["advanced_settings"]["full_content"] == {
-                "max_chars_per_result": 5000
+                "max_chars_per_result": 5000,
             }
+
+    @patch("langchain_parallel.extract_tool.get_parallel_client")
+    @patch("langchain_parallel.extract_tool.get_async_parallel_client")
+    def test_full_content_precedence_explicit_settings_wins(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Explicit FullContentSettings beats the tool-level cap."""
+        sync_client = Mock()
+        sync_client.extract.return_value = _make_response(
+            {"extract_id": "e", "results": [], "errors": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool(max_chars_per_extract=5000)
+            tool._run(
+                urls=["https://example.com"],
+                full_content=FullContentSettings(max_chars_per_result=200),
+            )
+            kwargs = sync_client.extract.call_args.kwargs
+            assert kwargs["advanced_settings"]["full_content"] == {
+                "max_chars_per_result": 200,
+            }
+
+    @patch("langchain_parallel.extract_tool.get_parallel_client")
+    @patch("langchain_parallel.extract_tool.get_async_parallel_client")
+    def test_full_content_false_omits_key(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """full_content=False produces no full_content key in advanced_settings."""
+        sync_client = Mock()
+        sync_client.extract.return_value = _make_response(
+            {"extract_id": "e", "results": [], "errors": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool()
+            tool._run(urls=["https://example.com"], full_content=False)
+            kwargs = sync_client.extract.call_args.kwargs
+            advanced = kwargs.get("advanced_settings") or {}
+            assert "full_content" not in advanced
+
+    @patch("langchain_parallel.extract_tool.get_parallel_client")
+    @patch("langchain_parallel.extract_tool.get_async_parallel_client")
+    def test_excerpts_bool_true_is_no_op(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Backward compat: excerpts=True (the default) adds no excerpt_settings."""
+        sync_client = Mock()
+        sync_client.extract.return_value = _make_response(
+            {"extract_id": "e", "results": [], "errors": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool()
+            tool._run(urls=["https://example.com"], excerpts=True)
+            advanced = sync_client.extract.call_args.kwargs.get("advanced_settings")
+            # No advanced settings at all when only the bool default is set.
+            assert advanced is None
+
+    @patch("langchain_parallel.extract_tool.get_parallel_client")
+    @patch("langchain_parallel.extract_tool.get_async_parallel_client")
+    def test_excerpts_bool_false_warns(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """excerpts=False emits a DeprecationWarning (v1 always returns excerpts)."""
+        sync_client = Mock()
+        sync_client.extract.return_value = _make_response(
+            {"extract_id": "e", "results": [], "errors": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool()
+            with pytest.warns(DeprecationWarning, match="always returns excerpts"):
+                tool._run(urls=["https://example.com"], excerpts=False)
+
+    @patch("langchain_parallel.extract_tool.get_parallel_client")
+    @patch("langchain_parallel.extract_tool.get_async_parallel_client")
+    def test_advanced_settings_envelope(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """ExcerptSettings + FetchPolicy + full_content nest into advanced_settings."""
+        sync_client = Mock()
+        sync_client.extract.return_value = _make_response(
+            {"extract_id": "e", "results": [], "errors": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool()
+            tool._run(
+                urls=["https://example.com"],
+                excerpts=ExcerptSettings(max_chars_per_result=2000),
+                full_content=FullContentSettings(max_chars_per_result=8000),
+                fetch_policy=FetchPolicy(max_age_seconds=86400),
+            )
+            kwargs = sync_client.extract.call_args.kwargs
+            assert kwargs["advanced_settings"] == {
+                "excerpt_settings": {"max_chars_per_result": 2000},
+                "fetch_policy": {
+                    "max_age_seconds": 86400,
+                    "disable_cache_fallback": False,
+                },
+                "full_content": {"max_chars_per_result": 8000},
+            }
+
+    @patch("langchain_parallel.extract_tool.get_parallel_client")
+    @patch("langchain_parallel.extract_tool.get_async_parallel_client")
+    def test_top_level_passthrough_fields(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """`max_chars_total`, `client_model`, `session_id` flow through verbatim."""
+        sync_client = Mock()
+        sync_client.extract.return_value = _make_response(
+            {"extract_id": "e", "results": [], "errors": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool()
+            tool._run(
+                urls=["https://example.com"],
+                max_chars_total=42_000,
+                client_model="claude-opus-4-7",
+                session_id="sess-1",
+            )
+            kwargs = sync_client.extract.call_args.kwargs
+            assert kwargs["max_chars_total"] == 42_000
+            assert kwargs["client_model"] == "claude-opus-4-7"
+            assert kwargs["session_id"] == "sess-1"
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")
@@ -257,9 +416,34 @@ class TestParallelExtractTool:
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelExtractTool()
-            _, artifact = await tool._arun(urls=["https://example.com"])
-            assert len(artifact) == 1
-            assert artifact[0]["content"] == "Async content"
+            result = await tool._arun(urls=["https://example.com"])
+            assert isinstance(result, list)
+            assert len(result) == 1
+            assert result[0]["content"] == "Async content"
+
+    @patch("langchain_parallel.extract_tool.get_parallel_client")
+    @patch("langchain_parallel.extract_tool.get_async_parallel_client")
+    @pytest.mark.asyncio
+    async def test_extract_async_handles_api_error(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Async API exceptions are wrapped as ValueError."""
+        async_client = Mock()
+        async_client.extract = AsyncMock(side_effect=Exception("Async API Error"))
+        mock_async_factory.return_value = async_client
+        mock_sync_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool()
+            with pytest.raises(
+                ValueError,
+                match="Error calling Parallel Extract API: Async API Error",
+            ):
+                await tool._arun(urls=["https://example.com"])
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")
@@ -280,5 +464,14 @@ class TestParallelExtractTool:
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelExtractTool()
-            _, artifact = tool._run(urls=["https://example.com"])
-            assert artifact == []
+            result = tool._run(urls=["https://example.com"])
+            assert result == []
+
+    def test_extract_empty_urls_raises(self) -> None:
+        """urls=[] raises ValueError."""
+        with patch(
+            "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelExtractTool()
+            with pytest.raises(ValueError, match="At least one URL"):
+                tool._run(urls=[])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from datetime import datetime
-from typing import Any, Literal, Optional, Union
+from typing import Any, Optional, Union
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForToolRun,
@@ -77,20 +77,6 @@ def _build_advanced_settings(
     if location is not None:
         settings["location"] = location
     return settings or None
-
-
-def _format_results_for_llm(response: dict[str, Any]) -> str:
-    """Build a compact, LLM-friendly string from the raw search response."""
-    results = response.get("results") or []
-    if not results:
-        return "No results."
-    lines: list[str] = []
-    for i, result in enumerate(results, 1):
-        title = result.get("title") or "(untitled)"
-        url = result.get("url") or ""
-        lines.append(f"{i}. {title}\n   {url}")
-        lines.extend(f"   - {excerpt}" for excerpt in result.get("excerpts") or [])
-    return "\n".join(lines)
 
 
 class ParallelWebSearchInput(BaseModel):
@@ -224,16 +210,13 @@ class ParallelWebSearchTool(BaseTool):
 
     Invocation:
         ```python
-        # Returns (content_str, artifact_dict). The string is what the agent
-        # sees in a ToolMessage; the dict is the full Parallel response.
-        content, artifact = tool.invoke({
+        result = tool.invoke({
             "objective": "Latest developments in AI agents",
             "search_queries": ["AI agents 2026", "autonomous LLM systems"],
             "mode": "advanced",
             "max_results": 5,
         })
-        print(content)
-        print(artifact["search_id"], len(artifact["results"]))
+        print(result["search_id"], len(result["results"]))
         ```
 
     Domain and freshness filters:
@@ -252,10 +235,10 @@ class ParallelWebSearchTool(BaseTool):
 
     Async:
         ```python
-        content, artifact = await tool.ainvoke({"search_queries": ["..."]})
+        result = await tool.ainvoke({"search_queries": ["..."]})
         ```
 
-    Response artifact:
+    Response shape:
         ```python
         {
             "search_id": "search_abc123",
@@ -285,17 +268,13 @@ class ParallelWebSearchTool(BaseTool):
         "Search the web using Parallel's Search API. "
         "Provides real-time web information with compressed, structured excerpts "
         "optimized for LLM consumption. Supports natural-language objectives, "
-        "keyword queries, domain filtering, and geo-targeting. Returns a "
-        "compact summary string plus the full structured response as artifact."
+        "keyword queries, domain filtering, and geo-targeting. Returns the "
+        "structured search response as a dict."
     )
     """The description passed to the model when performing tool calling."""
 
     args_schema: type[BaseModel] = ParallelWebSearchInput
     """The schema passed to the model when performing tool calling."""
-
-    response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
-    """Tools return ``(content, artifact)``: a compact summary string the
-    LLM sees, and the full Parallel API response dict for downstream code."""
 
     api_key: Optional[SecretStr] = Field(default=None)
     """Parallel API key. If not provided, will be read from
@@ -436,7 +415,7 @@ class ParallelWebSearchTool(BaseTool):
         include_metadata: bool = True,
         timeout: Optional[int] = None,
         run_manager: Optional[CallbackManagerForToolRun] = None,
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Execute the search using Parallel's Search API."""
         if self._client is None:
             msg = "Parallel client not initialized."
@@ -492,7 +471,7 @@ class ParallelWebSearchTool(BaseTool):
                 color="green",
             )
 
-        return _format_results_for_llm(response), response
+        return response
 
     async def _arun(
         self,
@@ -511,7 +490,7 @@ class ParallelWebSearchTool(BaseTool):
         include_metadata: bool = True,
         timeout: Optional[int] = None,
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Async execute the search using Parallel's Search API."""
         if self._async_client is None:
             msg = "Async Parallel client not initialized."
@@ -573,4 +552,4 @@ class ParallelWebSearchTool(BaseTool):
                 color="green",
             )
 
-        return _format_results_for_llm(response), response
+        return response

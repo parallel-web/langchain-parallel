@@ -28,7 +28,7 @@ from langchain_core.output_parsers import (
     PydanticOutputParser,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_core.runnables import Runnable, RunnableMap, RunnablePassthrough
+from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_json_schema
 from langchain_core.utils.pydantic import is_basemodel_subclass
 from openai import AuthenticationError, RateLimitError
@@ -719,8 +719,16 @@ class ChatParallelWeb(BaseChatModel):
 
         bound = self.bind(response_format=response_format)
         if include_raw:
-            return RunnableMap(raw=bound) | RunnablePassthrough.assign(
-                parsed=lambda x: output_parser.invoke(x["raw"]),
-                parsing_error=lambda _: None,
-            )
+
+            def _parse_with_capture(raw: AIMessage) -> dict[str, Any]:
+                try:
+                    return {
+                        "raw": raw,
+                        "parsed": output_parser.invoke(raw),
+                        "parsing_error": None,
+                    }
+                except Exception as e:
+                    return {"raw": raw, "parsed": None, "parsing_error": e}
+
+            return bound | _parse_with_capture
         return bound | output_parser

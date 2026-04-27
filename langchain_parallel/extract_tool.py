@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, Union
+import warnings
+from typing import Any, Optional, Union
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForToolRun,
@@ -35,16 +36,46 @@ def _coerce_full_content(
     return full_content
 
 
+def _coerce_excerpts(
+    excerpts: Union[bool, ExcerptSettings, dict[str, Any], None],
+) -> Optional[dict[str, Any]]:
+    """Resolve the legacy ``Union[bool, ExcerptSettings]`` excerpts arg.
+
+    In v1 GA, excerpts are always returned and the API has no flag to disable
+    them — only their per-result size is configurable. We accept the legacy
+    boolean for backward compatibility:
+
+    - ``None`` / ``True``: no excerpt-size override (API uses its default).
+    - ``False``: warn (the API can no longer disable excerpts) and treat as
+      no override.
+    - ``ExcerptSettings`` / ``dict``: pass through to advanced_settings.
+    """
+    if excerpts is None or excerpts is True:
+        return None
+    if excerpts is False:
+        warnings.warn(
+            "excerpts=False is no longer supported — the GA Extract API "
+            "always returns excerpts. Use ExcerptSettings(max_chars_per_result=…) "
+            "to control per-result size.",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+        return None
+    if isinstance(excerpts, ExcerptSettings):
+        return excerpts.model_dump(exclude_none=True)
+    return {k: v for k, v in excerpts.items() if v is not None}
+
+
 def _build_advanced_settings(
     *,
-    excerpts: Optional[ExcerptSettings],
+    excerpts_settings: Optional[dict[str, Any]],
     full_content: Union[bool, dict[str, Any]],
     fetch_policy: Optional[FetchPolicy],
 ) -> Optional[dict[str, Any]]:
     """Pack the user-facing flat fields into the GA `advanced_settings` envelope."""
     settings: dict[str, Any] = {}
-    if excerpts is not None:
-        settings["excerpt_settings"] = excerpts.model_dump(exclude_none=True)
+    if excerpts_settings is not None:
+        settings["excerpt_settings"] = excerpts_settings
     if fetch_policy is not None:
         settings["fetch_policy"] = fetch_policy.model_dump(exclude_none=True)
     # full_content goes through whether True/False/dict — the API treats False
@@ -52,24 +83,6 @@ def _build_advanced_settings(
     if full_content is not False:
         settings["full_content"] = full_content
     return settings or None
-
-
-def _format_results_for_llm(results: list[dict[str, Any]]) -> str:
-    """Build a compact, LLM-friendly string from formatted extract results."""
-    if not results:
-        return "No content extracted."
-    blocks: list[str] = []
-    for r in results:
-        url = r.get("url") or ""
-        title = r.get("title") or "(untitled)"
-        if "error_type" in r:
-            blocks.append(f"[ERROR] {title}\n  {url}\n  {r.get('content', '')}")
-            continue
-        body = r.get("content") or ""
-        if len(body) > 800:
-            body = body[:800] + "..."
-        blocks.append(f"## {title}\n{url}\n\n{body}")
-    return "\n\n---\n\n".join(blocks)
 
 
 class ParallelExtractInput(BaseModel):
@@ -88,12 +101,13 @@ class ParallelExtractInput(BaseModel):
         default=None,
         description="Keyword queries to focus extracted content.",
     )
-    excerpts: Optional[ExcerptSettings] = Field(
-        default=None,
+    excerpts: Union[bool, ExcerptSettings] = Field(
+        default=True,
         description=(
-            "Per-result excerpt-size settings. In v1 GA, excerpts are always "
-            "returned; this field controls only their size. Boolean values "
-            "are accepted via the legacy path with a deprecation warning."
+            "Include excerpts from each URL. In v1 GA, excerpts are always "
+            "returned; the boolean is kept for backward compatibility and "
+            "controls nothing on the wire. Pass an ExcerptSettings to control "
+            "per-result size (the API has no flag to disable excerpts in v1)."
         ),
     )
     full_content: Union[bool, FullContentSettings] = Field(
@@ -172,22 +186,21 @@ class ParallelExtractTool(BaseTool):
 
     Invocation:
         ```python
-        # Returns (content_str, artifact_list).
-        content, artifact = tool.invoke({
+        result = tool.invoke({
             "urls": ["https://en.wikipedia.org/wiki/Artificial_intelligence"],
             "search_objective": "Main applications of AI",
             "full_content": False,
         })
-        for r in artifact:
+        for r in result:
             print(r["url"], r.get("title"))
         ```
 
     Async:
         ```python
-        content, artifact = await tool.ainvoke({"urls": [...]})
+        result = await tool.ainvoke({"urls": [...]})
         ```
 
-    Response artifact (list[dict]):
+    Response shape (``list[dict]``):
         Each item carries `url`, `title`, optional `publish_date`, and
         either `excerpts` (always present in v1) and/or `full_content`.
         Errors carry `error_type` and `http_status_code`.
@@ -196,14 +209,10 @@ class ParallelExtractTool(BaseTool):
     name: str = "parallel_extract"
     description: str = (
         "Extract clean, structured content from web pages using Parallel's "
-        "Extract API. Returns a compact summary string plus a list of "
-        "per-URL records as artifact (url, title, excerpts, full_content)."
+        "Extract API. Returns a list of per-URL records "
+        "(url, title, excerpts, optional full_content)."
     )
     args_schema: type[BaseModel] = ParallelExtractInput
-
-    response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
-    """Tools return ``(content, artifact)``: a compact summary string the
-    LLM sees, and the per-URL records list for downstream code."""
 
     api_key: Optional[SecretStr] = Field(default=None)
     """Parallel API key. If not provided, will be read from env var."""
@@ -283,7 +292,7 @@ class ParallelExtractTool(BaseTool):
         urls: list[str],
         search_objective: Optional[str],
         search_queries: Optional[list[str]],
-        excerpts: Optional[ExcerptSettings],
+        excerpts: Union[bool, ExcerptSettings, dict[str, Any], None],
         full_content: Union[bool, FullContentSettings, dict[str, Any]],
         fetch_policy: Optional[FetchPolicy],
         max_chars_total: Optional[int],
@@ -301,7 +310,7 @@ class ParallelExtractTool(BaseTool):
             tool_max_chars=self.max_chars_per_extract,
         )
         advanced_settings = _build_advanced_settings(
-            excerpts=excerpts,
+            excerpts_settings=_coerce_excerpts(excerpts),
             full_content=full_content_resolved,
             fetch_policy=fetch_policy,
         )
@@ -328,7 +337,7 @@ class ParallelExtractTool(BaseTool):
         urls: list[str],
         search_objective: Optional[str] = None,
         search_queries: Optional[list[str]] = None,
-        excerpts: Optional[ExcerptSettings] = None,
+        excerpts: Union[bool, ExcerptSettings] = True,
         full_content: Union[bool, FullContentSettings] = False,
         max_chars_total: Optional[int] = None,
         fetch_policy: Optional[FetchPolicy] = None,
@@ -336,7 +345,7 @@ class ParallelExtractTool(BaseTool):
         session_id: Optional[str] = None,
         timeout: Optional[float] = None,
         run_manager: Optional[CallbackManagerForToolRun] = None,
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> list[dict[str, Any]]:
         """Extract content from URLs."""
         if self._client is None:
             msg = "Parallel client not initialized."
@@ -387,14 +396,14 @@ class ParallelExtractTool(BaseTool):
                 color="green",
             )
 
-        return _format_results_for_llm(formatted), formatted
+        return formatted
 
     async def _arun(
         self,
         urls: list[str],
         search_objective: Optional[str] = None,
         search_queries: Optional[list[str]] = None,
-        excerpts: Optional[ExcerptSettings] = None,
+        excerpts: Union[bool, ExcerptSettings] = True,
         full_content: Union[bool, FullContentSettings] = False,
         max_chars_total: Optional[int] = None,
         fetch_policy: Optional[FetchPolicy] = None,
@@ -402,7 +411,7 @@ class ParallelExtractTool(BaseTool):
         session_id: Optional[str] = None,
         timeout: Optional[float] = None,
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> list[dict[str, Any]]:
         """Async extract content from URLs."""
         if self._async_client is None:
             msg = "Async Parallel client not initialized."
@@ -456,4 +465,4 @@ class ParallelExtractTool(BaseTool):
                 color="green",
             )
 
-        return _format_results_for_llm(formatted), formatted
+        return formatted

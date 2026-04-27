@@ -180,21 +180,7 @@ print(result)
 
 ### Agents
 
-```python
-from langchain.agents import create_openai_functions_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate
-
-# Create an agent with web research capabilities
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful assistant with access to real-time web information."),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-
-# Use with tools for additional capabilities
-# agent = create_openai_functions_agent(chat, tools, prompt)
-# agent_executor = AgentExecutor(agent=agent, tools=tools)
-```
+Parallel's Chat API does not support tool calling, so `ChatParallelWeb` cannot be the LLM that drives an agent. Use it as a research assistant inside a chain (above), or use Parallel's tools (`ParallelWebSearchTool`, `ParallelExtractTool`) with a tool-calling chat model (Anthropic, OpenAI, etc.) — see the **Tool Usage in Agents** section below.
 
 ## Search API
 
@@ -209,18 +195,15 @@ from langchain_parallel import ParallelWebSearchTool
 
 search_tool = ParallelWebSearchTool()
 
-# In a tool-calling agent, the tool returns a ToolMessage with .content
-# (compact LLM-readable summary) and .artifact (full Parallel response).
-# To get both directly:
-content, artifact = search_tool._run(
-    search_queries=["renewable energy 2026", "solar power developments"],
-    max_results=5,
-)
-print(content)
-print(artifact["search_id"], len(artifact["results"]))
-```
+result = search_tool.invoke({
+    "search_queries": ["renewable energy 2026", "solar power developments"],
+    "max_results": 5,
+})
 
-> **0.3.0 migration note**: tools now use `response_format="content_and_artifact"`. A bare `tool.invoke({...})` returns the content string only; pass a tool-call envelope (`{"args": {...}, "id": "1", "name": tool.name, "type": "tool_call"}`) to get back a `ToolMessage` with `.artifact`, or call `tool._run(...)` for the `(content, artifact)` tuple.
+print(result["search_id"], len(result["results"]))
+for r in result["results"]:
+    print(r["title"], "-", r["url"])
+```
 
 
 
@@ -230,14 +213,19 @@ print(artifact["search_id"], len(artifact["results"]))
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `objective` | `Optional[str]` | `None` | Natural-language description of research goal |
-| `search_queries` | `Optional[List[str]]` | `None` | Specific search queries (max 5, 200 chars each) |
-| `max_results` | `int` | `10` | Maximum results to return (1-40) |
-| `excerpts` | `Optional[dict]` | `None` | Excerpt settings (e.g., {'max_chars_per_result': 1500}) |
-| `mode` | `Optional[str]` | `None` | Search mode: 'one-shot' for comprehensive results, 'agentic' for token-efficient results |
-| `fetch_policy` | `Optional[dict]` | `None` | Policy for cached vs live content (e.g., {'max_age_seconds': 86400, 'timeout_seconds': 60}) |
-| `api_key` | `Optional[SecretStr]` | `None` | API key (uses env var if not provided) |
-| `base_url` | `str` | `"https://api.parallel.ai"` | API base URL |
+| `objective` | `Optional[str]` | `None` | Natural-language description of research goal (≤5000 chars). |
+| `search_queries` | `Optional[List[str]]` | `None` | Keyword queries (max 5, 200 chars each). Required for the GA endpoint; without it, calls fall back to `/v1beta` with a deprecation warning. |
+| `max_results` | `int` | `10` | Maximum results to return (1–40). |
+| `excerpts` | `Optional[ExcerptSettings]` | `None` | Per-result excerpt-size cap. |
+| `max_chars_total` | `Optional[int]` | `None` | Cap on total excerpt characters across all results. |
+| `mode` | `Optional[Literal["basic", "advanced"]]` | `None` (API default `advanced`) | `basic` is lower-latency; `advanced` is higher quality with more retrieval and compression. Legacy values `fast`, `one-shot` (→ `basic`) and `agentic` (→ `advanced`) are accepted with a `DeprecationWarning`. |
+| `source_policy` | `Optional[SourcePolicy]` | `None` | Domain include/exclude lists and freshness floor (`after_date`). |
+| `fetch_policy` | `Optional[FetchPolicy]` | `None` | Cache vs live-fetch policy (e.g. `FetchPolicy(max_age_seconds=86400, timeout_seconds=60)`). |
+| `location` | `Optional[str]` | `None` | ISO 3166-1 alpha-2 country code (e.g. `"us"`, `"gb"`). |
+| `client_model` | `Optional[str]` | `None` | Identifier of the calling LLM, used for model-specific result optimizations. |
+| `session_id` | `Optional[str]` | `None` | Shared id grouping related Search/Extract calls in one task. |
+| `api_key` | `Optional[SecretStr]` | `None` | API key (uses `PARALLEL_API_KEY` env var if not provided). |
+| `base_url` | `str` | `"https://api.parallel.ai"` | API base URL. |
 
 ### Search with Specific Queries
 
@@ -257,30 +245,26 @@ result = search_tool.invoke({
 
 ### Tool Usage in Agents
 
-The search tool works seamlessly with LangChain agents:
+Use the search tool with a tool-calling chat model (e.g. Anthropic Claude or OpenAI) and `create_agent`. Note that Parallel's own Chat API does not currently support tool calling, so use a different model class for the agent's LLM and use Parallel as a tool.
 
 ```python
-from langchain.agents import create_openai_functions_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.agents import create_agent
+from langchain_parallel import ParallelWebSearchTool, ParallelExtractTool
 
-# Create agent with search capabilities
-tools = [search_tool]
+agent = create_agent(
+    "anthropic:claude-haiku-4-5",
+    tools=[ParallelWebSearchTool(), ParallelExtractTool()],
+    system_prompt=(
+        "You are a research assistant. Use parallel_web_search to find "
+        "current information and parallel_extract to read specific pages."
+    ),
+)
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a research assistant. Use the search tool to find current information."),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-
-agent = create_openai_functions_agent(chat, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools)
-
-# Run the agent
-result = agent_executor.invoke({
-    "input": "What are the latest developments in artificial intelligence?"
-})
-print(result["output"])
+result = agent.invoke({"messages": [("human", "Latest AI breakthroughs?")]})
+print(result["messages"][-1].content)
 ```
+
+See `docs/demo_agent.ipynb` for a full walkthrough.
 
 ## Extract API
 
@@ -371,15 +355,18 @@ print(f"Content length: {len(result[0]['content'])} characters")
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `urls` | `List[str]` | Required | List of URLs to extract content from |
-| `search_objective` | `Optional[str]` | `None` | Natural language objective to focus extraction |
-| `search_queries` | `Optional[List[str]]` | `None` | Specific keyword queries to focus extraction |
-| `excerpts` | `Union[bool, ExcerptSettings]` | `True` | Include relevant excerpts (focused on objective/queries if provided) |
-| `full_content` | `Union[bool, FullContentSettings]` | `False` | Include full page content |
-| `fetch_policy` | `Optional[FetchPolicy]` | `None` | Cache vs live content policy |
-| `max_chars_per_extract` | `Optional[int]` | `None` | Maximum characters per extraction (tool-level setting) |
-| `api_key` | `Optional[SecretStr]` | `None` | API key (uses env var if not provided) |
-| `base_url` | `str` | `"https://api.parallel.ai"` | API base URL |
+| `urls` | `List[str]` | Required | List of URLs to extract content from (up to 20 per request). |
+| `search_objective` | `Optional[str]` | `None` | Natural language objective to focus extraction (≤5000 chars). |
+| `search_queries` | `Optional[List[str]]` | `None` | Specific keyword queries to focus extraction. |
+| `excerpts` | `Union[bool, ExcerptSettings]` | `True` | In v1 GA, excerpts are always returned; the bool is kept for backward compatibility, and `ExcerptSettings(max_chars_per_result=…)` controls per-result size. |
+| `full_content` | `Union[bool, FullContentSettings]` | `False` | Include full page content in addition to excerpts. |
+| `max_chars_total` | `Optional[int]` | `None` | Cap on total excerpt characters across all results. Does not affect `full_content`. |
+| `fetch_policy` | `Optional[FetchPolicy]` | `None` | Cache vs live content policy. |
+| `client_model` | `Optional[str]` | `None` | Identifier of the calling LLM, used for model-specific result optimizations. |
+| `session_id` | `Optional[str]` | `None` | Shared id grouping related Search/Extract calls in one task. |
+| `max_chars_per_extract` | `Optional[int]` | `None` | Tool-level default cap on `full_content` size; only applied when `full_content=True`. |
+| `api_key` | `Optional[SecretStr]` | `None` | API key (uses `PARALLEL_API_KEY` env var if not provided). |
+| `base_url` | `str` | `"https://api.parallel.ai"` | API base URL. |
 
 ### Error Handling
 
@@ -510,11 +497,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Changelog
 
-### v0.1.0
-- Initial release
-- **Chat Models**: ChatParallelWeb with real-time web research
-- **Search Tools**: ParallelWebSearchTool for direct API access
-- **Extract Tools**: ParallelExtractTool for clean content extraction
-- Streaming and async/await support
-- Batch URL extraction with error handling
-- Full LangChain ecosystem compatibility
+See [`CHANGELOG.md`](./CHANGELOG.md) for the full version history.
