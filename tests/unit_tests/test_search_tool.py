@@ -69,16 +69,55 @@ class TestParallelWebSearchTool:
             assert kwargs["advanced_settings"] == {"max_results": 3}
             assert isinstance(result, dict)
             assert result["search_id"] == "search-1"
-            assert "search_duration_seconds" in result["search_metadata"]
+            assert result["search_metadata"]["endpoint"] == "v1"
 
-    def test_run_requires_search_queries(self) -> None:
-        """Calling without search_queries raises with a migration hint."""
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    def test_run_falls_back_to_beta_when_objective_only(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Objective-only routes to /v1beta with a DeprecationWarning.
+
+        This is a deprecated path slated for removal in 0.4.0; it exists so
+        0.2.x callers passing only ``objective`` keep working.
+        """
+        sync_client = Mock()
+        sync_client.beta.search.return_value = _make_response(
+            {"search_id": "beta-1", "results": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
         with patch(
             "langchain_parallel.search_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelWebSearchTool()
-            with pytest.raises(ValueError, match="search_queries is required"):
-                tool._run(objective="What is AI?")
+            with pytest.warns(DeprecationWarning, match="0.4.0"):
+                result = tool._run(
+                    objective="What is AI?",
+                    mode="advanced",
+                    source_policy={"include_domains": ["wikipedia.org"]},
+                )
+            sync_client.beta.search.assert_called_once()
+            sync_client.search.assert_not_called()
+            beta_kwargs = sync_client.beta.search.call_args.kwargs
+            # advanced -> agentic on the legacy endpoint
+            assert beta_kwargs["mode"] == "agentic"
+            assert beta_kwargs["source_policy"] == {
+                "include_domains": ["wikipedia.org"],
+            }
+            assert result["search_metadata"]["endpoint"] == "v1beta"
+
+    def test_run_raises_when_neither_objective_nor_queries(self) -> None:
+        """At least one of objective or search_queries must be provided."""
+        with patch(
+            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelWebSearchTool()
+            with pytest.raises(ValueError, match="objective.*search_queries.*provided"):
+                tool._run()
 
     @patch("langchain_parallel.search_tool.get_parallel_client")
     @patch("langchain_parallel.search_tool.get_async_parallel_client")

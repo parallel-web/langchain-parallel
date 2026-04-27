@@ -90,11 +90,13 @@ class ParallelWebSearchInput(BaseModel):
             "alongside `search_queries` for best results."
         ),
     )
-    search_queries: list[str] = Field(
+    search_queries: Optional[list[str]] = Field(
+        default=None,
         description=(
-            "Required. 1-5 keyword search queries (3-6 words each, up to "
-            "200 characters). Pair with an optional `objective` for best "
-            "results."
+            "1-5 keyword search queries (3-6 words each, up to 200 characters). "
+            "Required by Parallel's GA endpoint; if omitted, the call routes "
+            "to the deprecated /v1beta endpoint with a DeprecationWarning. "
+            "Pair with an optional `objective` for best results."
         ),
     )
     max_results: int = Field(
@@ -251,6 +253,7 @@ class ParallelWebSearchTool(BaseTool):
             "search_metadata": {  # added by this tool when include_metadata=True
                 "search_duration_seconds": 2.451,
                 "search_timestamp": "2026-04-27T10:30:00",
+                "endpoint": "v1",  # or "v1beta" if search_queries was omitted
                 "actual_results_returned": 5,
             }
         }
@@ -300,6 +303,7 @@ class ParallelWebSearchTool(BaseTool):
         self,
         *,
         start_time: datetime,
+        endpoint: str,
         response: dict[str, Any],
     ) -> dict[str, Any]:
         """Build client-side timing/result metadata."""
@@ -310,6 +314,7 @@ class ParallelWebSearchTool(BaseTool):
                 3,
             ),
             "search_timestamp": start_time.isoformat(),
+            "endpoint": endpoint,
             "actual_results_returned": len(response.get("results") or []),
         }
 
@@ -328,19 +333,55 @@ class ParallelWebSearchTool(BaseTool):
         max_results: int,
         location: Optional[str],
         timeout: Optional[int],
-    ) -> dict[str, Any]:
-        """Resolve params into the GA `client.search(...)` kwargs shape."""
-        if not search_queries:
-            msg = (
-                "search_queries is required (1-5 keyword strings, 3-6 words "
-                "each). Pass at least one query; pair with an optional "
-                "`objective` for best results. See "
-                "https://docs.parallel.ai/search/search-migration-guide for "
-                "migrating from the pre-GA objective-only call shape."
-            )
+    ) -> tuple[str, dict[str, Any]]:
+        """Resolve params + endpoint (`v1` GA vs `v1beta` legacy fallback).
+
+        The v1beta path is deprecated and will be removed in 0.4.0; it exists
+        so 0.2.x callers passing only ``objective`` keep working through the
+        Parallel API beta sunset (~June 2026).
+        """
+        if not objective and not search_queries:
+            msg = "Either 'objective' or 'search_queries' must be provided."
             raise ValueError(msg)
 
         normalized_mode = _normalize_mode(mode)
+
+        if not search_queries:
+            warnings.warn(
+                "Calling Parallel Search without `search_queries` routes to "
+                "the deprecated /v1beta endpoint and will be removed in "
+                "langchain-parallel 0.4.0. Pass `search_queries=[...]` (1-5 "
+                "keyword strings, 3-6 words each) to use the GA /v1 endpoint. "
+                "See https://docs.parallel.ai/search/search-migration-guide.",
+                DeprecationWarning,
+                stacklevel=4,
+            )
+            beta_kwargs: dict[str, Any] = {
+                "objective": objective,
+                "max_results": max_results,
+            }
+            if excerpts is not None:
+                beta_kwargs["excerpts"] = excerpts.model_dump(exclude_none=True)
+            if fetch_policy is not None:
+                beta_kwargs["fetch_policy"] = fetch_policy.model_dump(exclude_none=True)
+            sp = _coerce_source_policy(source_policy)
+            if sp:
+                beta_kwargs["source_policy"] = sp
+            if normalized_mode is not None:
+                # v1beta speaks the legacy mode dialect.
+                beta_kwargs["mode"] = (
+                    "agentic" if normalized_mode == "advanced" else "one-shot"
+                )
+            if client_model is not None:
+                beta_kwargs["client_model"] = client_model
+            if session_id is not None:
+                beta_kwargs["session_id"] = session_id
+            if location is not None:
+                beta_kwargs["location"] = location
+            if timeout is not None:
+                beta_kwargs["timeout"] = timeout
+            return "v1beta", beta_kwargs
+
         advanced_settings = _build_advanced_settings(
             excerpts=excerpts,
             fetch_policy=fetch_policy,
@@ -348,7 +389,6 @@ class ParallelWebSearchTool(BaseTool):
             max_results=max_results,
             location=location,
         )
-
         kwargs: dict[str, Any] = {"search_queries": list(search_queries)}
         if objective is not None:
             kwargs["objective"] = objective
@@ -364,13 +404,14 @@ class ParallelWebSearchTool(BaseTool):
             kwargs["advanced_settings"] = advanced_settings
         if timeout is not None:
             kwargs["timeout"] = timeout
-        return kwargs
+        return "v1", kwargs
 
     def _finalize_response(
         self,
         response_obj: Any,
         *,
         start_time: datetime,
+        endpoint: str,
         include_metadata: bool,
     ) -> dict[str, Any]:
         """Convert SDK response to dict and attach client-side metadata."""
@@ -378,6 +419,7 @@ class ParallelWebSearchTool(BaseTool):
         if include_metadata:
             response["search_metadata"] = self._build_metadata(
                 start_time=start_time,
+                endpoint=endpoint,
                 response=response,
             )
         return response
@@ -429,7 +471,7 @@ class ParallelWebSearchTool(BaseTool):
                 color="blue",
             )
 
-        kwargs = self._build_call_kwargs(
+        endpoint, kwargs = self._build_call_kwargs(
             objective=objective,
             search_queries=search_queries,
             mode=mode,
@@ -445,7 +487,11 @@ class ParallelWebSearchTool(BaseTool):
         )
 
         try:
-            response_obj = self._client.search(**kwargs)
+            response_obj: Any = (
+                self._client.search(**kwargs)
+                if endpoint == "v1"
+                else self._client.beta.search(**kwargs)
+            )
         except Exception as e:
             if run_manager:
                 run_manager.on_text(f"Search failed: {e!s}\n", color="red")
@@ -455,6 +501,7 @@ class ParallelWebSearchTool(BaseTool):
         response = self._finalize_response(
             response_obj,
             start_time=start_time,
+            endpoint=endpoint,
             include_metadata=include_metadata,
         )
         if run_manager:
@@ -494,7 +541,7 @@ class ParallelWebSearchTool(BaseTool):
                 color="blue",
             )
 
-        kwargs = self._build_call_kwargs(
+        endpoint, kwargs = self._build_call_kwargs(
             objective=objective,
             search_queries=search_queries,
             mode=mode,
@@ -510,7 +557,11 @@ class ParallelWebSearchTool(BaseTool):
         )
 
         try:
-            response_obj = await self._async_client.search(**kwargs)
+            response_obj = (
+                await self._async_client.search(**kwargs)
+                if endpoint == "v1"
+                else await self._async_client.beta.search(**kwargs)
+            )
         except Exception as e:
             if run_manager:
                 await run_manager.on_text(
@@ -523,6 +574,7 @@ class ParallelWebSearchTool(BaseTool):
         response = self._finalize_response(
             response_obj,
             start_time=start_time,
+            endpoint=endpoint,
             include_metadata=include_metadata,
         )
         if run_manager:

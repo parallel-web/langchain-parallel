@@ -17,11 +17,14 @@ This release migrates Search and Extract to Parallel's v1 GA endpoints, surfaces
 - **Citations on chat responses**: for the research models, `AIMessage.response_metadata["basis"]` carries the API's per-field citations / reasoning / confidence list. `response_metadata["interaction_id"]` is surfaced for multi-turn context chaining; `system_fingerprint` is forwarded when present.
 - **`SourcePolicy` pydantic model** in `langchain_parallel._types` mirroring the API's `include_domains` / `exclude_domains` / `after_date`. Both `SourcePolicy(...)` and a raw dict are accepted on `ParallelSearchTool`.
 
+### Deprecated
+
+- **Search without `search_queries`**: calls passing only `objective` route to the deprecated `/v1beta` endpoint with a `DeprecationWarning`. The fallback will be **removed in 0.4.0**; the Parallel API itself sunsets `/v1beta` no earlier than June 2026. Pair `objective` with `search_queries=[...]` (1-5 keyword strings, 3-6 words each) to use the GA `/v1` endpoint.
+- **Legacy `mode` values**: `"fast"`, `"one-shot"`, and `"agentic"` continue to call the API correctly with a `DeprecationWarning` mapping them to the GA values (`"fast"` / `"one-shot"` → `"basic"`, `"agentic"` → `"advanced"`). The GA values `"basic"` and `"advanced"` are now the canonical set.
+- **`Extract.excerpts=False`**: the GA Extract API always returns excerpts and has no flag to disable them; passing `False` is accepted with a `DeprecationWarning` and ignored. Use `ExcerptSettings(max_chars_per_result=…)` to control per-result size.
+
 ### Changed
 
-- **BREAKING — `search_queries` is required for Search**. Previously the tool accepted `objective` alone (silently calling the deprecated `/v1beta` endpoint). With v1 GA, calls without `search_queries` raise `ValueError` with a migration hint pointing at https://docs.parallel.ai/search/search-migration-guide. Existing call sites that pair `objective` with `search_queries` are unaffected.
-- **`mode` strings**: legacy values `"fast"`, `"one-shot"`, and `"agentic"` continue to call the API correctly with a `DeprecationWarning` mapping them to the GA values (`"fast"` / `"one-shot"` → `"basic"`, `"agentic"` → `"advanced"`). The GA values `"basic"` and `"advanced"` are now the canonical set.
-- **Extract `excerpts: bool` is now a no-op**: the GA Extract API always returns excerpts, so passing `excerpts=True` (the default) is unchanged on the wire and `excerpts=False` is accepted with a `DeprecationWarning`. Use `ExcerptSettings(max_chars_per_result=…)` to control per-result size.
 - **`response_metadata["model_name"]`**: chat completions now emit the LangChain 1.x standard key `model_name` (was `model`). Tracing systems and `langchain-tests`' standard suite check for this name.
 - **`parallel-web` SDK bumped** from `^0.3.3` to `^0.5.1`. Brings in the v1 GA Search/Extract types, `AdvancedSearchSettingsParam` / `AdvancedExtractSettingsParam`, and the FindAll / Task Group / Monitor surfaces (not yet exposed by this integration — see `IMPROVEMENT_PLAN.md` Phase 2).
 - **Slimmed `_client.py`**: the four hand-rolled `ParallelSearchClient` / `AsyncParallelSearchClient` / `ParallelExtractClient` / `AsyncParallelExtractClient` wrapper classes have been removed in favor of using `parallel.Parallel` / `parallel.AsyncParallel` directly. Internal change; no public surface impact.
@@ -36,19 +39,21 @@ This release migrates Search and Extract to Parallel's v1 GA endpoints, surfaces
 
 ### Migration
 
-- **Search** (only required change for most users): add `search_queries=[…]` (1-5 keyword strings, 3-6 words each). Pair with the existing `objective=…` for best results.
+For most users, **no code changes are required**. The recommended-but-optional updates to silence deprecation warnings:
+
+- **Search**: add `search_queries=[…]` (1-5 keyword strings, 3-6 words each) to use the GA `/v1` endpoint.
   ```python
-  # Before (0.2.x — silently used /v1beta)
+  # 0.2.x (still works in 0.3.x with a DeprecationWarning; will break in 0.4.0)
   tool.invoke({"objective": "What are the latest AI breakthroughs?"})
 
-  # After (0.3.x — uses /v1 GA)
+  # 0.3.x preferred (GA /v1 endpoint)
   tool.invoke({
       "search_queries": ["latest AI breakthroughs", "AI advances 2026"],
       "objective": "What are the latest AI breakthroughs?",
   })
   ```
-- **Search mode**: rename `mode="one-shot"`/`"fast"` → `mode="basic"` and `mode="agentic"` → `mode="advanced"` to silence the legacy-value deprecation warning.
-- **Chat**: prefer `ChatParallel(model="lite")` (or `"base"` / `"core"`) over `model_name="..."`. Read citations off `response.response_metadata["basis"]` and structured outputs via `chat.with_structured_output(MyPydanticModel)`. The old class name `ChatParallelWeb` continues to work.
+- **Search mode**: rename `mode="one-shot"`/`"fast"` → `mode="basic"` and `mode="agentic"` → `mode="advanced"`.
+- **Chat**: prefer `ChatParallel(model="lite")` (or `"base"` / `"core"`) over `model_name="..."`. Read citations from `response.response_metadata["basis"]` and structured outputs via `chat.with_structured_output(MyPydanticModel)`. The old class name `ChatParallelWeb` continues to work.
 
 ## [0.2.0] - 2025-12-01
 

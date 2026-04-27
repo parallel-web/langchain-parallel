@@ -215,7 +215,7 @@ for r in result["results"]:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `objective` | `Optional[str]` | `None` | Natural-language description of research goal (≤5000 chars). |
-| `search_queries` | `List[str]` | Required | 1-5 keyword queries (3-6 words each, ≤200 chars). Pair with an optional `objective` for best results. |
+| `search_queries` | `Optional[List[str]]` | `None` | 1-5 keyword queries (3-6 words each, ≤200 chars). Required by the GA `/v1` endpoint; if omitted, the call routes to the deprecated `/v1beta` endpoint with a `DeprecationWarning` (slated for removal in 0.4.0). Pair with an optional `objective` for best results. |
 | `max_results` | `int` | `10` | Maximum results to return (1–40). |
 | `excerpts` | `Optional[ExcerptSettings]` | `None` | Per-result excerpt-size cap. |
 | `max_chars_total` | `Optional[int]` | `None` | Cap on total excerpt characters across all results. |
