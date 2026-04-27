@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator, Iterator
-from typing import Any, Optional, cast
+from typing import Any, Literal, Optional, Union, cast
 
 import openai
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
-from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -23,12 +23,22 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
 )
+from langchain_core.output_parsers import (
+    JsonOutputParser,
+    PydanticOutputParser,
+)
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.runnables import Runnable, RunnableMap, RunnablePassthrough
+from langchain_core.utils.function_calling import convert_to_json_schema
+from langchain_core.utils.pydantic import is_basemodel_subclass
 from openai import AuthenticationError, RateLimitError
-from pydantic import Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from typing_extensions import Self
 
 from ._client import get_api_key, get_async_openai_client, get_openai_client
+
+# Models that support response_format JSON schema. The `speed` model ignores it.
+_STRUCTURED_OUTPUT_MODELS: frozenset[str] = frozenset({"lite", "base", "core"})
 
 
 def _convert_message_to_dict(message: BaseMessage) -> dict[str, Any]:
@@ -50,12 +60,31 @@ def _prepare_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
 
 
 def _create_response_metadata(response: Any, choice: Any) -> dict[str, Any]:
-    """Create response metadata from API response."""
-    return {
-        "model": getattr(response, "model", None),
+    """Create response metadata from API response.
+
+    Uses LangChain 1.x standard keys (`model_name`, `finish_reason`,
+    `system_fingerprint`). Surfaces Parallel-specific fields (`basis`,
+    `interaction_id`) when present.
+    """
+    metadata: dict[str, Any] = {
+        "model_name": getattr(response, "model", None),
         "finish_reason": getattr(choice, "finish_reason", None),
         "created": getattr(response, "created", None),
     }
+    system_fingerprint = getattr(response, "system_fingerprint", None)
+    if system_fingerprint is not None:
+        metadata["system_fingerprint"] = system_fingerprint
+    basis = getattr(response, "basis", None)
+    if basis:
+        metadata["basis"] = (
+            [b.model_dump() if hasattr(b, "model_dump") else b for b in basis]
+            if isinstance(basis, list)
+            else basis
+        )
+    interaction_id = getattr(response, "interaction_id", None)
+    if interaction_id is not None:
+        metadata["interaction_id"] = interaction_id
+    return metadata
 
 
 def _create_ai_message(content: str, response_metadata: dict[str, Any]) -> AIMessage:
@@ -69,11 +98,22 @@ def _create_ai_message(content: str, response_metadata: dict[str, Any]) -> AIMes
 
 def _create_stream_response_metadata(chunk: Any, choice: Any) -> dict[str, Any]:
     """Create response metadata for streaming chunks."""
-    response_metadata = {}
+    response_metadata: dict[str, Any] = {}
     if hasattr(choice, "finish_reason") and choice.finish_reason is not None:
         response_metadata["finish_reason"] = str(choice.finish_reason)
     if hasattr(chunk, "model"):
-        response_metadata["model"] = chunk.model
+        response_metadata["model_name"] = chunk.model
+    if getattr(chunk, "system_fingerprint", None) is not None:
+        response_metadata["system_fingerprint"] = chunk.system_fingerprint
+    if getattr(chunk, "interaction_id", None) is not None:
+        response_metadata["interaction_id"] = chunk.interaction_id
+    basis = getattr(chunk, "basis", None)
+    if basis:
+        response_metadata["basis"] = (
+            [b.model_dump() if hasattr(b, "model_dump") else b for b in basis]
+            if isinstance(basis, list)
+            else basis
+        )
     return response_metadata
 
 
@@ -219,8 +259,17 @@ class ChatParallelWeb(BaseChatModel):
 
     """
 
-    model: str = Field(default="speed", alias="model_name")
-    """The name of the model to use. Defaults to 'speed' for Parallel."""
+    model: str = Field(default="speed")
+    """The name of the model to use.
+
+    One of:
+
+    - ``"speed"`` (default): low-latency conversational answers, no citations.
+    - ``"lite"`` / ``"base"`` / ``"core"``: research models with web access
+      that return source citations on ``response_metadata['basis']`` and
+      support ``response_format`` JSON schemas via
+      :meth:`with_structured_output`.
+    """
 
     api_key: Optional[SecretStr] = Field(default=None)
     """Parallel API key. If not provided, will be read from
@@ -274,6 +323,24 @@ class ChatParallelWeb(BaseChatModel):
 
     _client: Optional[openai.OpenAI] = None
     _async_client: Optional[openai.AsyncOpenAI] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_model_name_alias(cls, values: Any) -> Any:
+        """Accept ``model_name="..."`` as a back-compat alias for ``model="..."``.
+
+        Pre-0.3.0 the field was declared as ``Field(alias="model_name")``,
+        meaning users had to pass ``model_name=`` and ``model=`` was silently
+        ignored. The alias was removed in 0.3.0 to fix that footgun; this
+        validator preserves callers that still use ``model_name=``.
+        """
+        if (
+            isinstance(values, dict)
+            and "model_name" in values
+            and "model" not in values
+        ):
+            values = {**values, "model": values.pop("model_name")}
+        return values
 
     @model_validator(mode="after")
     def validate_environment(self) -> Self:
@@ -339,7 +406,7 @@ class ChatParallelWeb(BaseChatModel):
     @property
     def lc_attributes(self) -> dict[str, Any]:
         """Return attributes for LangChain serialization."""
-        attributes: dict[str, Any] = {}
+        attributes: dict[str, Any] = {"model_name": self.model}
         if self.base_url:
             attributes["base_url"] = self.base_url
         return attributes
@@ -377,7 +444,7 @@ class ChatParallelWeb(BaseChatModel):
         choice = response.choices[0]
         content = choice.message.content or ""
         response_metadata = _create_response_metadata(response, choice)
-        response_metadata["model"] = response_metadata["model"] or self.model
+        response_metadata["model_name"] = response_metadata["model_name"] or self.model
 
         message = _create_ai_message(content, response_metadata)
         generation = ChatGeneration(message=message)
@@ -437,6 +504,33 @@ class ChatParallelWeb(BaseChatModel):
 
         return ChatGenerationChunk(message=chunk_message)
 
+    def _build_create_kwargs(
+        self,
+        messages: list[dict[str, Any]],
+        stop: Optional[list[str]],
+        *,
+        stream: bool,
+        extra: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build kwargs for the OpenAI ``chat.completions.create`` call.
+
+        Per-call ``extra`` (typically populated by ``with_structured_output``)
+        wins over instance-level fields.
+        """
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": cast(Any, messages),
+            "stream": stream,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stop": stop,
+        }
+        if self.response_format is not None:
+            create_kwargs["response_format"] = self.response_format
+        # Per-call overrides from the runnable kwargs. Drop None values.
+        create_kwargs.update({k: v for k, v in extra.items() if v is not None})
+        return create_kwargs
+
     def _generate(
         self,
         messages: list[BaseMessage],
@@ -449,12 +543,12 @@ class ChatParallelWeb(BaseChatModel):
 
         with self._handle_errors():
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=cast(Any, openai_messages),
-                stream=False,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop=stop,
+                **self._build_create_kwargs(
+                    openai_messages,
+                    stop,
+                    stream=False,
+                    extra=kwargs,
+                ),
             )
 
             return self._process_non_stream_response(response)
@@ -471,12 +565,12 @@ class ChatParallelWeb(BaseChatModel):
 
         with self._handle_errors():
             stream = self.client.chat.completions.create(
-                model=self.model,
-                messages=cast(Any, openai_messages),
-                stream=True,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop=stop,
+                **self._build_create_kwargs(
+                    openai_messages,
+                    stop,
+                    stream=True,
+                    extra=kwargs,
+                ),
             )
 
             for chunk in stream:
@@ -496,12 +590,12 @@ class ChatParallelWeb(BaseChatModel):
 
         with self._handle_errors():
             response = await self.async_client.chat.completions.create(
-                model=self.model,
-                messages=cast(Any, openai_messages),
-                stream=False,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop=stop,
+                **self._build_create_kwargs(
+                    openai_messages,
+                    stop,
+                    stream=False,
+                    extra=kwargs,
+                ),
             )
 
             return self._process_non_stream_response(response)
@@ -518,12 +612,12 @@ class ChatParallelWeb(BaseChatModel):
 
         with self._handle_errors():
             stream = await self.async_client.chat.completions.create(
-                model=self.model,
-                messages=cast(Any, openai_messages),
-                stream=True,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop=stop,
+                **self._build_create_kwargs(
+                    openai_messages,
+                    stop,
+                    stream=True,
+                    extra=kwargs,
+                ),
             )
 
             async for chunk in stream:
@@ -532,3 +626,101 @@ class ChatParallelWeb(BaseChatModel):
                 )
                 if chunk_result is not None:
                     yield chunk_result
+
+    def with_structured_output(
+        self,
+        schema: Optional[Union[dict[str, Any], type[BaseModel]]] = None,
+        *,
+        method: Literal["json_schema", "function_calling", "json_mode"] = "json_schema",
+        include_raw: bool = False,
+        strict: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, Union[dict[str, Any], BaseModel]]:
+        """Return a Runnable that produces structured output.
+
+        Parallel's research models (``lite``, ``base``, ``core``) accept the
+        OpenAI ``response_format`` parameter with a JSON schema. The ``speed``
+        model silently ignores it; this method raises if you try to use it
+        on a non-supporting model so the failure is loud.
+
+        Args:
+            schema: A pydantic v2 model class or a JSON schema dict.
+            method: ``"json_schema"`` (default) for strict-typed output, or
+                ``"json_mode"`` to ask the model for any valid JSON object.
+                ``"function_calling"`` is accepted for cross-provider
+                compatibility and is routed to ``"json_schema"`` since
+                Parallel's chat API does not support tool calling.
+            include_raw: If True, return ``{"raw": AIMessage, "parsed": ...,
+                "parsing_error": ...}`` instead of just the parsed value.
+            strict: Forwarded to the API's ``response_format`` JSON schema.
+                Defaults to True for pydantic schemas, None for raw dicts.
+            **kwargs: Reserved for forward compatibility; unused.
+        """
+        if kwargs:
+            msg = f"Received unsupported kwargs: {sorted(kwargs)}"
+            raise ValueError(msg)
+        if self.model not in _STRUCTURED_OUTPUT_MODELS:
+            msg = (
+                f"Structured output requires one of the research models "
+                f"({sorted(_STRUCTURED_OUTPUT_MODELS)}); the '{self.model}' "
+                f"model silently ignores response_format. Re-instantiate with "
+                f"`ChatParallelWeb(model='lite' | 'base' | 'core')`."
+            )
+            raise ValueError(msg)
+        if method == "function_calling":
+            # Parallel chat doesn't support tool calling; route to json_schema
+            # since the user-visible result is equivalent.
+            method = "json_schema"
+        if method not in {"json_schema", "json_mode"}:
+            msg = (
+                f"Unsupported method '{method}'. Use 'json_schema', "
+                f"'function_calling' (routed to json_schema), or 'json_mode'."
+            )
+            raise ValueError(msg)
+
+        if method == "json_mode":
+            # `json_mode` only enables JSON output without a schema constraint;
+            # if a schema is also passed, accept it for cross-provider compat
+            # but only use it for the parser, not for the API call.
+            response_format: dict[str, Any] = {"type": "json_object"}
+            schema_is_pydantic = (
+                schema is not None
+                and isinstance(schema, type)
+                and is_basemodel_subclass(schema)
+            )
+            output_parser: Runnable = (
+                PydanticOutputParser(pydantic_object=schema)  # type: ignore[arg-type]
+                if schema_is_pydantic
+                else JsonOutputParser()
+            )
+        else:
+            if schema is None:
+                msg = "method='json_schema' requires a schema."
+                raise ValueError(msg)
+            is_pydantic = isinstance(schema, type) and is_basemodel_subclass(schema)
+            strict_value: Optional[bool]
+            if is_pydantic:
+                json_schema = convert_to_json_schema(schema)
+                output_parser = PydanticOutputParser(pydantic_object=schema)  # type: ignore[arg-type]
+                strict_value = True if strict is None else strict
+            else:
+                json_schema = dict(schema)  # type: ignore[arg-type]
+                output_parser = JsonOutputParser()
+                strict_value = strict
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": json_schema.get("title", "output"),
+                    "schema": json_schema,
+                },
+            }
+            if strict_value is not None:
+                response_format["json_schema"]["strict"] = strict_value
+
+        bound = self.bind(response_format=response_format)
+        if include_raw:
+            return RunnableMap(raw=bound) | RunnablePassthrough.assign(
+                parsed=lambda x: output_parser.invoke(x["raw"]),
+                parsing_error=lambda _: None,
+            )
+        return bound | output_parser

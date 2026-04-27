@@ -4,6 +4,7 @@ from langchain_parallel._types import (
     ExcerptSettings,
     FetchPolicy,
     FullContentSettings,
+    SourcePolicy,
 )
 from langchain_parallel.chat_models import ChatParallelWeb
 from langchain_parallel.extract_tool import ParallelExtractTool
@@ -23,5 +24,6 @@ __all__ = [
     "FullContentSettings",
     "ParallelExtractTool",
     "ParallelWebSearchTool",
+    "SourcePolicy",
     "__version__",
 ]

@@ -20,6 +20,11 @@ class TestChatParallelWebUnit(ChatModelUnitTests):
             "api_key": "test-api-key",
         }
 
+    @property
+    def standard_chat_model_params(self) -> dict:
+        """Parallel ignores most OpenAI sampling params; keep tests honest."""
+        return {}
+
     # Configure capabilities based on Parallel's Chat API features
     @property
     def has_tool_calling(self) -> bool:
@@ -86,8 +91,15 @@ class TestChatParallelWebUnit(ChatModelUnitTests):
 
     @property
     def structured_output_kwargs(self) -> dict:
-        """Additional kwargs for with_structured_output."""
-        return {"method": "function_calling"}
+        """Additional kwargs for with_structured_output.
+
+        Parallel research models (`lite`, `base`, `core`) accept
+        ``response_format`` JSON schemas; ``function_calling`` is not
+        supported. The base class doesn't enable structured output
+        (see :attr:`has_structured_output`); subclasses that flip the
+        flag should default to ``method='json_schema'``.
+        """
+        return {"method": "json_schema"}
 
     @property
     def supported_usage_metadata_details(self) -> dict:
@@ -124,3 +136,24 @@ class TestChatParallelWebUnit(ChatModelUnitTests):
                 "api_key": "test-env-api-key",
             },
         )
+
+
+class TestChatParallelWebUnitLite(TestChatParallelWebUnit):
+    """Unit tests parametrized for the `lite` research model.
+
+    `lite` (and `base`/`core`) accept ``response_format`` JSON schema, so the
+    structured-output capability flag is True for those models.
+    """
+
+    @property
+    def chat_model_params(self) -> dict:
+        return {"model": "lite", "api_key": "test-api-key"}
+
+    @property
+    def has_structured_output(self) -> bool:
+        return True
+
+    @property
+    def structured_output_kwargs(self) -> dict:
+        # Parallel research models use json_schema, not function_calling.
+        return {"method": "json_schema"}

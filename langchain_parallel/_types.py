@@ -58,3 +58,26 @@ class FetchPolicy(BaseModel):
             "fetch fails or times out. If true, returns an error instead."
         ),
     )
+
+
+class SourcePolicy(BaseModel):
+    """Domain allow/deny lists and freshness floor for web research."""
+
+    include_domains: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "If provided, only sources from these apex domains are returned. "
+            "Combined include + exclude lists are capped at 200 domains."
+        ),
+    )
+    exclude_domains: Optional[list[str]] = Field(
+        default=None,
+        description="If provided, sources from these apex domains are excluded.",
+    )
+    after_date: Optional[str] = Field(
+        default=None,
+        description=(
+            "ISO date (YYYY-MM-DD). Only return sources published on or after "
+            "this date."
+        ),
+    )

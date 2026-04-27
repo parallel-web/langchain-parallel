@@ -1191,14 +1191,14 @@ files = [
 
 [[package]]
 name = "parallel-web"
-version = "0.3.3"
+version = "0.5.1"
 description = "The official Python library for the Parallel API"
 optional = false
-python-versions = ">=3.8"
+python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "parallel_web-0.3.3-py3-none-any.whl", hash = "sha256:730187f8754c81bbdb7f3d06c5c44b6df25d665366c051f34409ab04aad69570"},
-    {file = "parallel_web-0.3.3.tar.gz", hash = "sha256:31a33ae094182887d731390468d816a52dc76a7f462f8e00b91477098cb00e50"},
+    {file = "parallel_web-0.5.1-py3-none-any.whl", hash = "sha256:7db65556a362d44ae864b5e4881a239e96377bcefbf931616d9c3b80a6124c21"},
+    {file = "parallel_web-0.5.1.tar.gz", hash = "sha256:e967f3bd1833c73db30ea11aa49f5b3248c10342af1fa768a4a290ff8f4301f6"},
 ]
 
 [package.dependencies]
@@ -1207,7 +1207,7 @@ distro = ">=1.7.0,<2"
 httpx = ">=0.23.0,<1"
 pydantic = ">=1.9.0,<3"
 sniffio = "*"
-typing-extensions = ">=4.10,<5"
+typing-extensions = ">=4.14,<5"
 
 [package.extras]
 aiohttp = ["aiohttp", "httpx-aiohttp (>=0.1.9)"]
@@ -2566,4 +2566,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "85dcc91af918c74e6c832182b6a6d130a51c6da49bb4c3b586ed4976a6edc72b"
+content-hash = "1f2192a6249d32118c66b8ab9f78754e93a50cde422fef85e96d70e19cdc6053"

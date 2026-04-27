@@ -33,28 +33,48 @@ export PARALLEL_API_KEY="your-api-key-here"
 
 The `ChatParallelWeb` class provides access to Parallel's Chat API, which combines language models with real-time web research capabilities.
 
+#### Picking a model
+
+| Model | Latency | Citations (`response_metadata["basis"]`) | Structured output |
+|-------|---------|------------------------------------------|-------------------|
+| `speed` (default) | ~3s | none | not supported |
+| `lite` | seconds | yes | `with_structured_output()` |
+| `base` | seconds–minutes | yes | `with_structured_output()` |
+| `core` | minutes | yes (most thorough) | `with_structured_output()` |
+
 #### Basic Usage
 
 ```python
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_parallel.chat_models import ChatParallelWeb
 
-# Initialize the chat model
-chat = ChatParallelWeb(
-    model="speed",  # Parallel's chat model
-    temperature=0.7,  # Optional: ignored by Parallel
-    max_tokens=None,  # Optional: ignored by Parallel
-)
+chat = ChatParallelWeb(model="speed")
 
-# Create messages
 messages = [
     SystemMessage(content="You are a helpful assistant with access to real-time web information."),
-    HumanMessage(content="What are the latest developments in artificial intelligence?")
+    HumanMessage(content="What are the latest developments in artificial intelligence?"),
 ]
 
-# Get response
 response = chat.invoke(messages)
 print(response.content)
+# Citations on the research models (lite/base/core):
+print(response.response_metadata.get("basis"))
+```
+
+#### Structured output (research models)
+
+```python
+from pydantic import BaseModel, Field
+from langchain_parallel import ChatParallelWeb
+
+class Founder(BaseModel):
+    name: str = Field(description="Full name of the founder")
+    company: str = Field(description="Company they founded")
+
+structured = ChatParallelWeb(model="lite").with_structured_output(Founder)
+result = structured.invoke([("human", "Who founded SpaceX?")])
+print(result)
+# Founder(name='Elon Musk', company='SpaceX')
 ```
 
 #### Streaming Responses
@@ -187,30 +207,20 @@ The search tool provides direct access to Parallel's Search API:
 ```python
 from langchain_parallel import ParallelWebSearchTool
 
-# Initialize the search tool
 search_tool = ParallelWebSearchTool()
 
-# Search with an objective
-result = search_tool.invoke({
-    "objective": "What are the latest developments in renewable energy?",
-    "max_results": 5
-})
-
-print(result)
-# {
-#     "search_id": "search_123...",
-#     "results": [
-#         {
-#             "url": "https://example.com/renewable-energy",
-#             "title": "Latest Renewable Energy Developments",
-#             "excerpts": [
-#                 "Solar energy has seen remarkable growth...",
-#                 "Wind power capacity increased by 15%..."
-#             ]
-#         }
-#     ]
-# }
+# In a tool-calling agent, the tool returns a ToolMessage with .content
+# (compact LLM-readable summary) and .artifact (full Parallel response).
+# To get both directly:
+content, artifact = search_tool._run(
+    search_queries=["renewable energy 2026", "solar power developments"],
+    max_results=5,
+)
+print(content)
+print(artifact["search_id"], len(artifact["results"]))
 ```
+
+> **0.3.0 migration note**: tools now use `response_format="content_and_artifact"`. A bare `tool.invoke({...})` returns the content string only; pass a tool-call envelope (`{"args": {...}, "id": "1", "name": tool.name, "type": "tool_call"}`) to get back a `ToolMessage` with `.artifact`, or call `tool._run(...)` for the `(content, artifact)` tuple.
 
 
 

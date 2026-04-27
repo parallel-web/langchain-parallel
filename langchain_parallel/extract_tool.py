@@ -2,68 +2,136 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForToolRun,
     CallbackManagerForToolRun,
 )
 from langchain_core.tools import BaseTool
+from parallel import AsyncParallel, Parallel
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
-from ._client import get_api_key, get_async_extract_client, get_extract_client
+from ._client import get_api_key, get_async_parallel_client, get_parallel_client
 from ._types import ExcerptSettings, FetchPolicy, FullContentSettings
+
+
+def _coerce_full_content(
+    full_content: Union[bool, FullContentSettings, dict[str, Any]],
+    *,
+    tool_max_chars: Optional[int],
+) -> Union[bool, dict[str, Any]]:
+    """Resolve the user-provided full_content arg + tool-level default.
+
+    Precedence: an explicit FullContentSettings or dict wins over tool_max_chars,
+    which only applies when full_content was passed as a plain True/False.
+    """
+    if isinstance(full_content, FullContentSettings):
+        return full_content.model_dump(exclude_none=True)
+    if isinstance(full_content, dict):
+        return {k: v for k, v in full_content.items() if v is not None}
+    if full_content is True and tool_max_chars is not None:
+        return {"max_chars_per_result": tool_max_chars}
+    return full_content
+
+
+def _build_advanced_settings(
+    *,
+    excerpts: Optional[ExcerptSettings],
+    full_content: Union[bool, dict[str, Any]],
+    fetch_policy: Optional[FetchPolicy],
+) -> Optional[dict[str, Any]]:
+    """Pack the user-facing flat fields into the GA `advanced_settings` envelope."""
+    settings: dict[str, Any] = {}
+    if excerpts is not None:
+        settings["excerpt_settings"] = excerpts.model_dump(exclude_none=True)
+    if fetch_policy is not None:
+        settings["fetch_policy"] = fetch_policy.model_dump(exclude_none=True)
+    # full_content goes through whether True/False/dict — the API treats False
+    # as "do not return full content" (default).
+    if full_content is not False:
+        settings["full_content"] = full_content
+    return settings or None
+
+
+def _format_results_for_llm(results: list[dict[str, Any]]) -> str:
+    """Build a compact, LLM-friendly string from formatted extract results."""
+    if not results:
+        return "No content extracted."
+    blocks: list[str] = []
+    for r in results:
+        url = r.get("url") or ""
+        title = r.get("title") or "(untitled)"
+        if "error_type" in r:
+            blocks.append(f"[ERROR] {title}\n  {url}\n  {r.get('content', '')}")
+            continue
+        body = r.get("content") or ""
+        if len(body) > 800:
+            body = body[:800] + "..."
+        blocks.append(f"## {title}\n{url}\n\n{body}")
+    return "\n\n---\n\n".join(blocks)
 
 
 class ParallelExtractInput(BaseModel):
     """Input schema for Parallel Extract Tool."""
 
-    urls: list[str] = Field(description="List of URLs to extract content from")
-
+    urls: list[str] = Field(
+        description="List of URLs to extract content from. Up to 20 per request.",
+    )
     search_objective: Optional[str] = Field(
         default=None,
         description=(
-            "If provided, focuses extracted content on the specified search objective"
+            "Natural-language objective to focus extraction. Up to 5000 characters."
         ),
     )
-
     search_queries: Optional[list[str]] = Field(
         default=None,
+        description="Keyword queries to focus extracted content.",
+    )
+    excerpts: Optional[ExcerptSettings] = Field(
+        default=None,
         description=(
-            "If provided, focuses extracted content on the specified keyword search "
-            "queries"
+            "Per-result excerpt-size settings. In v1 GA, excerpts are always "
+            "returned; this field controls only their size. Boolean values "
+            "are accepted via the legacy path with a deprecation warning."
         ),
     )
-
-    excerpts: Union[bool, ExcerptSettings] = Field(
-        default=True,
-        description=(
-            "Include excerpts from each URL relevant to the search objective and "
-            "queries. Can be boolean or ExcerptSettings object."
-        ),
-    )
-
     full_content: Union[bool, FullContentSettings] = Field(
         default=False,
         description=(
-            "Include full content from each URL. Can be boolean or "
-            "FullContentSettings object."
+            "Include full page content in addition to excerpts. "
+            "Use FullContentSettings(max_chars_per_result=...) to cap size."
         ),
     )
-
-    fetch_policy: Optional[FetchPolicy] = Field(
+    max_chars_total: Optional[int] = Field(
         default=None,
         description=(
-            "Fetch policy: determines when to return content from the cache "
-            "(faster) vs fetching live content (fresher)"
+            "Upper bound on total characters of excerpts across all results. "
+            "Does not affect full_content."
         ),
     )
-
+    fetch_policy: Optional[FetchPolicy] = Field(
+        default=None,
+        description="Policy for cached vs live content fetches.",
+    )
+    client_model: Optional[str] = Field(
+        default=None,
+        description=(
+            "Identifier of the calling LLM, used by the API for "
+            "model-specific result optimizations."
+        ),
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Group related Search and Extract calls made by the same agent task "
+            "under a shared session id. The server returns one if not provided."
+        ),
+    )
     timeout: Optional[float] = Field(
         default=None,
         description=(
-            "Request timeout in seconds. If not specified, uses default of "
-            "5 seconds per URL."
+            "Request timeout in seconds. If not specified, uses the SDK default."
         ),
     )
 
@@ -71,8 +139,9 @@ class ParallelExtractInput(BaseModel):
 class ParallelExtractTool(BaseTool):
     """Parallel Extract Tool.
 
-    This tool extracts clean, structured content from web pages using the
-    Parallel Extract API.
+    Calls Parallel's Extract API to pull clean, structured content from web
+    pages. Returns a compact summary string the LLM sees and the full
+    structured response as a tool artifact.
 
     Setup:
         Install `langchain-parallel` and set environment variable
@@ -90,54 +159,51 @@ class ParallelExtractTool(BaseTool):
         base_url: str
             Base URL for Parallel API. Defaults to "https://api.parallel.ai".
         max_chars_per_extract: Optional[int]
-            Maximum characters per extracted result.
+            Tool-wide default cap on full_content size (per URL). Only applied
+            when full_content is passed as ``True`` (a settings object always
+            wins).
 
     Instantiation:
         ```python
         from langchain_parallel import ParallelExtractTool
 
-        # Basic instantiation
         tool = ParallelExtractTool()
-
-        # With custom API key and parameters
-        tool = ParallelExtractTool(
-            api_key="your-api-key",
-            max_chars_per_extract=5000
-        )
         ```
 
     Invocation:
         ```python
-        # Extract content from URLs
-        result = tool.invoke({
-            "urls": [
-                "https://example.com/article1",
-                "https://example.com/article2"
-            ]
+        # Returns (content_str, artifact_list).
+        content, artifact = tool.invoke({
+            "urls": ["https://en.wikipedia.org/wiki/Artificial_intelligence"],
+            "search_objective": "Main applications of AI",
+            "full_content": False,
         })
-
-        # Result is a list of dicts with url, title, and content
-        for item in result:
-            print(f"Title: {item['title']}")
-            print(f"URL: {item['url']}")
-            print(f"Content: {item['content'][:200]}...")
+        for r in artifact:
+            print(r["url"], r.get("title"))
         ```
 
-    Response Format:
-        Returns a list of dictionaries, each containing:
-        - url: The URL that was extracted
-        - title: Title of the webpage
-        - content: Full extracted content as markdown
-        - publish_date: Publish date if available (optional)
+    Async:
+        ```python
+        content, artifact = await tool.ainvoke({"urls": [...]})
+        ```
+
+    Response artifact (list[dict]):
+        Each item carries `url`, `title`, optional `publish_date`, and
+        either `excerpts` (always present in v1) and/or `full_content`.
+        Errors carry `error_type` and `http_status_code`.
     """
 
     name: str = "parallel_extract"
     description: str = (
-        "Extract clean, structured content from web pages. "
-        "Input should be a list of URLs to extract content from. "
-        "Returns extracted content formatted as markdown."
+        "Extract clean, structured content from web pages using Parallel's "
+        "Extract API. Returns a compact summary string plus a list of "
+        "per-URL records as artifact (url, title, excerpts, full_content)."
     )
     args_schema: type[BaseModel] = ParallelExtractInput
+
+    response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
+    """Tools return ``(content, artifact)``: a compact summary string the
+    LLM sees, and the per-URL records list for downstream code."""
 
     api_key: Optional[SecretStr] = Field(default=None)
     """Parallel API key. If not provided, will be read from env var."""
@@ -146,108 +212,58 @@ class ParallelExtractTool(BaseTool):
     """Base URL for Parallel API."""
 
     max_chars_per_extract: Optional[int] = None
-    """Maximum characters per extracted result."""
+    """Tool-wide default cap on full_content size (per URL).
+    Only applied when ``full_content=True`` is passed.
+    """
 
-    _client: Any = None
-    """Synchronous extract client (initialized after validation)."""
+    _client: Optional[Parallel] = None
+    """Synchronous Parallel SDK client (initialized after validation)."""
 
-    _async_client: Any = None
-    """Asynchronous extract client (initialized after validation)."""
+    _async_client: Optional[AsyncParallel] = None
+    """Asynchronous Parallel SDK client (initialized after validation)."""
 
     @model_validator(mode="after")
     def validate_environment(self) -> ParallelExtractTool:
-        """Validate the environment and initialize clients."""
-        # Get API key from parameter or environment
+        """Validate the environment and initialize SDK clients."""
         api_key_str = get_api_key(
-            self.api_key.get_secret_value() if self.api_key else None
+            self.api_key.get_secret_value() if self.api_key else None,
         )
-
-        # Initialize both sync and async clients once
-        self._client = get_extract_client(api_key_str, self.base_url)
-        self._async_client = get_async_extract_client(api_key_str, self.base_url)
-
+        self._client = get_parallel_client(api_key_str, self.base_url)
+        self._async_client = get_async_parallel_client(api_key_str, self.base_url)
         return self
 
-    def _prepare_extract_params(
+    def _format_response(
         self,
-        excerpts: Union[bool, ExcerptSettings],
-        full_content: Union[bool, FullContentSettings],
-        fetch_policy: Optional[FetchPolicy],
-    ) -> tuple[Any, Any, Optional[dict[str, Any]]]:
-        """Prepare parameters for extract API call.
-
-        Args:
-            excerpts: Include excerpts (boolean or ExcerptSettings)
-            full_content: Include full content (boolean or FullContentSettings)
-            fetch_policy: Optional fetch policy for cache vs live content
-
-        Returns:
-            Tuple of (excerpts_param, full_content_param, fetch_policy_param)
-        """
-        # Build full_content config
-        full_content_param = full_content
-        if self.max_chars_per_extract and isinstance(full_content, bool):
-            # Use tool-level config if full_content is just a boolean
-            full_content_param = {"max_chars_per_result": self.max_chars_per_extract}
-        elif isinstance(full_content, FullContentSettings):
-            full_content_param = full_content.model_dump(exclude_none=True)
-
-        # Build excerpts config
-        excerpts_param = excerpts
-        if isinstance(excerpts, ExcerptSettings):
-            excerpts_param = excerpts.model_dump(exclude_none=True)
-
-        # Build fetch_policy config
-        fetch_policy_param = None
-        if fetch_policy:
-            fetch_policy_param = fetch_policy.model_dump(exclude_none=True)
-
-        return excerpts_param, full_content_param, fetch_policy_param
-
-    def _format_extract_response(
-        self, extract_response: dict[str, Any]
+        extract_response: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Format the extract API response.
+        """Format the extract API response into a per-URL list.
 
-        Args:
-            extract_response: Raw response from the extract API
-
-        Returns:
-            List of formatted result dictionaries
+        Mirrors the v0.2 shape so existing consumers continue to work:
+        - "content" stays populated (full_content if present, else joined excerpts)
+        - error rows carry "error_type" and "http_status_code"
         """
-        results = extract_response.get("results", [])
-        errors = extract_response.get("errors", [])
+        results = extract_response.get("results") or []
+        errors = extract_response.get("errors") or []
 
-        # Format results
-        formatted_results = []
+        formatted: list[dict[str, Any]] = []
         for result in results:
-            formatted_result = {
+            entry: dict[str, Any] = {
                 "url": result.get("url"),
                 "title": result.get("title"),
             }
-
-            # Add excerpts if present
-            if "excerpts" in result and result["excerpts"] is not None:
-                formatted_result["excerpts"] = result["excerpts"]
-                # Combine excerpts into content field for backward compatibility
-                # Excerpts are a list of strings, join them with newlines
-                formatted_result["content"] = "\n\n".join(result["excerpts"])
-
-            # Add full_content if present and not None
-            # (overrides excerpts-based content)
-            if "full_content" in result and result["full_content"] is not None:
-                formatted_result["full_content"] = result["full_content"]
-                # For backward compatibility, also set as "content"
-                formatted_result["content"] = result["full_content"]
-
-            # Add optional fields if present
+            excerpts = result.get("excerpts")
+            full_content = result.get("full_content")
+            if excerpts is not None:
+                entry["excerpts"] = excerpts
+                entry["content"] = "\n\n".join(excerpts)
+            if full_content is not None:
+                entry["full_content"] = full_content
+                entry["content"] = full_content
             if "publish_date" in result:
-                formatted_result["publish_date"] = result["publish_date"]
+                entry["publish_date"] = result["publish_date"]
+            formatted.append(entry)
 
-            formatted_results.append(formatted_result)
-
-        # If there were errors, add them to the results with error info
-        formatted_results.extend(
+        formatted.extend(
             [
                 {
                     "url": error.get("url"),
@@ -257,180 +273,187 @@ class ParallelExtractTool(BaseTool):
                     "http_status_code": error.get("http_status_code"),
                 }
                 for error in errors
-            ]
+            ],
+        )
+        return formatted
+
+    def _build_call_kwargs(
+        self,
+        *,
+        urls: list[str],
+        search_objective: Optional[str],
+        search_queries: Optional[list[str]],
+        excerpts: Optional[ExcerptSettings],
+        full_content: Union[bool, FullContentSettings, dict[str, Any]],
+        fetch_policy: Optional[FetchPolicy],
+        max_chars_total: Optional[int],
+        client_model: Optional[str],
+        session_id: Optional[str],
+        timeout: Optional[float],
+    ) -> dict[str, Any]:
+        """Resolve params into the GA `client.extract(...)` shape."""
+        if not urls:
+            msg = "At least one URL must be provided."
+            raise ValueError(msg)
+
+        full_content_resolved = _coerce_full_content(
+            full_content,
+            tool_max_chars=self.max_chars_per_extract,
+        )
+        advanced_settings = _build_advanced_settings(
+            excerpts=excerpts,
+            full_content=full_content_resolved,
+            fetch_policy=fetch_policy,
         )
 
-        return formatted_results
+        kwargs: dict[str, Any] = {"urls": list(urls)}
+        if search_objective is not None:
+            kwargs["objective"] = search_objective
+        if search_queries is not None:
+            kwargs["search_queries"] = list(search_queries)
+        if max_chars_total is not None:
+            kwargs["max_chars_total"] = max_chars_total
+        if client_model is not None:
+            kwargs["client_model"] = client_model
+        if session_id is not None:
+            kwargs["session_id"] = session_id
+        if advanced_settings is not None:
+            kwargs["advanced_settings"] = advanced_settings
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return kwargs
 
     def _run(
         self,
         urls: list[str],
         search_objective: Optional[str] = None,
         search_queries: Optional[list[str]] = None,
-        excerpts: Union[bool, ExcerptSettings] = True,
+        excerpts: Optional[ExcerptSettings] = None,
         full_content: Union[bool, FullContentSettings] = False,
+        max_chars_total: Optional[int] = None,
         fetch_policy: Optional[FetchPolicy] = None,
+        client_model: Optional[str] = None,
+        session_id: Optional[str] = None,
         timeout: Optional[float] = None,
         run_manager: Optional[CallbackManagerForToolRun] = None,
-    ) -> list[dict[str, Any]]:
-        """Extract content from URLs.
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Extract content from URLs."""
+        if self._client is None:
+            msg = "Parallel client not initialized."
+            raise RuntimeError(msg)
 
-        Args:
-            urls: List of URLs to extract content from
-            search_objective: Optional search objective to focus extraction
-            search_queries: Optional keyword search queries to focus extraction
-            excerpts: Include excerpts (boolean or ExcerptSettings)
-            full_content: Include full content (boolean or FullContentSettings)
-            fetch_policy: Optional fetch policy for cache vs live content
-            timeout: Request timeout in seconds (defaults to 5 seconds per URL)
-            run_manager: Callback manager for the tool run
-
-        Returns:
-            List of dictionaries with extracted content
-        """
-        # Notify callback manager about extraction start
         if run_manager:
-            url_count = len(urls)
-            url_desc = f"{url_count} URL{'s' if url_count != 1 else ''}"
+            count = len(urls)
             run_manager.on_text(
-                f"Starting content extraction from {url_desc}\n", color="blue"
+                f"Starting content extraction from {count} URL"
+                f"{'' if count == 1 else 's'}\n",
+                color="blue",
             )
+
+        kwargs = self._build_call_kwargs(
+            urls=urls,
+            search_objective=search_objective,
+            search_queries=search_queries,
+            excerpts=excerpts,
+            full_content=full_content,
+            fetch_policy=fetch_policy,
+            max_chars_total=max_chars_total,
+            client_model=client_model,
+            session_id=session_id,
+            timeout=timeout,
+        )
 
         try:
-            # Prepare parameters for the extract API call
-            excerpts_param, full_content_param, fetch_policy_param = (
-                self._prepare_extract_params(excerpts, full_content, fetch_policy)
-            )
-
-            # Notify about extraction execution
-            if run_manager:
-                run_manager.on_text("Executing extraction...\n", color="yellow")
-
-            # Extract content from URLs using the pre-initialized client
-            extract_response = self._client.extract(
-                urls=urls,
-                objective=search_objective,
-                search_queries=search_queries,
-                excerpts=excerpts_param,
-                full_content=full_content_param,
-                fetch_policy=fetch_policy_param,
-                timeout=timeout,
-            )
-
-            # Format and return the response
-            result = self._format_extract_response(extract_response)
-
-            # Notify callback manager about completion
-            if run_manager:
-                success_count = sum(1 for item in result if "error_type" not in item)
-                error_count = len(result) - success_count
-                if error_count > 0:
-                    run_manager.on_text(
-                        f"Extraction completed: {success_count} succeeded, "
-                        f"{error_count} failed\n",
-                        color="green",
-                    )
-                else:
-                    url_text = "URL" if success_count == 1 else "URLs"
-                    run_manager.on_text(
-                        f"Extraction completed: {success_count} {url_text} processed\n",
-                        color="green",
-                    )
-
-            return result
-
+            response_obj = self._client.extract(**kwargs)
         except Exception as e:
-            # Notify callback manager about error
             if run_manager:
                 run_manager.on_text(f"Extraction failed: {e!s}\n", color="red")
             msg = f"Error calling Parallel Extract API: {e!s}"
             raise ValueError(msg) from e
+
+        formatted = self._format_response(response_obj.model_dump())
+
+        if run_manager:
+            success_count = sum(1 for item in formatted if "error_type" not in item)
+            error_count = len(formatted) - success_count
+            run_manager.on_text(
+                (
+                    f"Extraction completed: {success_count} succeeded, "
+                    f"{error_count} failed\n"
+                    if error_count
+                    else f"Extraction completed: {success_count} URL"
+                    f"{'' if success_count == 1 else 's'} processed\n"
+                ),
+                color="green",
+            )
+
+        return _format_results_for_llm(formatted), formatted
 
     async def _arun(
         self,
         urls: list[str],
         search_objective: Optional[str] = None,
         search_queries: Optional[list[str]] = None,
-        excerpts: Union[bool, ExcerptSettings] = True,
+        excerpts: Optional[ExcerptSettings] = None,
         full_content: Union[bool, FullContentSettings] = False,
+        max_chars_total: Optional[int] = None,
         fetch_policy: Optional[FetchPolicy] = None,
+        client_model: Optional[str] = None,
+        session_id: Optional[str] = None,
         timeout: Optional[float] = None,
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
-    ) -> list[dict[str, Any]]:
-        """Extract content from URLs asynchronously.
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Async extract content from URLs."""
+        if self._async_client is None:
+            msg = "Async Parallel client not initialized."
+            raise RuntimeError(msg)
 
-        Args:
-            urls: List of URLs to extract content from
-            search_objective: Optional search objective to focus extraction
-            search_queries: Optional keyword search queries to focus extraction
-            excerpts: Include excerpts (boolean or ExcerptSettings)
-            full_content: Include full content (boolean or FullContentSettings)
-            fetch_policy: Optional fetch policy for cache vs live content
-            timeout: Request timeout in seconds (defaults to 5 seconds per URL)
-            run_manager: Async callback manager for the tool run
-
-        Returns:
-            List of dictionaries with extracted content
-        """
-        # Notify callback manager about extraction start
         if run_manager:
-            url_count = len(urls)
-            url_desc = f"{url_count} URL{'s' if url_count != 1 else ''}"
+            count = len(urls)
             await run_manager.on_text(
-                f"Starting async content extraction from {url_desc}\n", color="blue"
+                f"Starting async content extraction from {count} URL"
+                f"{'' if count == 1 else 's'}\n",
+                color="blue",
             )
+
+        kwargs = self._build_call_kwargs(
+            urls=urls,
+            search_objective=search_objective,
+            search_queries=search_queries,
+            excerpts=excerpts,
+            full_content=full_content,
+            fetch_policy=fetch_policy,
+            max_chars_total=max_chars_total,
+            client_model=client_model,
+            session_id=session_id,
+            timeout=timeout,
+        )
 
         try:
-            # Prepare parameters for the extract API call
-            excerpts_param, full_content_param, fetch_policy_param = (
-                self._prepare_extract_params(excerpts, full_content, fetch_policy)
-            )
-
-            # Notify about extraction execution
-            if run_manager:
-                await run_manager.on_text(
-                    "Executing async extraction...\n", color="yellow"
-                )
-
-            # Extract content from URLs using the pre-initialized async client
-            extract_response = await self._async_client.extract(
-                urls=urls,
-                objective=search_objective,
-                search_queries=search_queries,
-                excerpts=excerpts_param,
-                full_content=full_content_param,
-                fetch_policy=fetch_policy_param,
-                timeout=timeout,
-            )
-
-            # Format and return the response
-            result = self._format_extract_response(extract_response)
-
-            # Notify callback manager about completion
-            if run_manager:
-                success_count = sum(1 for item in result if "error_type" not in item)
-                error_count = len(result) - success_count
-                if error_count > 0:
-                    await run_manager.on_text(
-                        f"Async extraction completed: {success_count} succeeded, "
-                        f"{error_count} failed\n",
-                        color="green",
-                    )
-                else:
-                    url_text = "URL" if success_count == 1 else "URLs"
-                    await run_manager.on_text(
-                        f"Async extraction completed: {success_count} {url_text} "
-                        f"processed\n",
-                        color="green",
-                    )
-
-            return result
-
+            response_obj = await self._async_client.extract(**kwargs)
         except Exception as e:
-            # Notify callback manager about error
             if run_manager:
                 await run_manager.on_text(
-                    f"Async extraction failed: {e!s}\n", color="red"
+                    f"Async extraction failed: {e!s}\n",
+                    color="red",
                 )
             msg = f"Error calling Parallel Extract API: {e!s}"
             raise ValueError(msg) from e
+
+        formatted = self._format_response(response_obj.model_dump())
+
+        if run_manager:
+            success_count = sum(1 for item in formatted if "error_type" not in item)
+            error_count = len(formatted) - success_count
+            await run_manager.on_text(
+                (
+                    f"Async extraction completed: {success_count} succeeded, "
+                    f"{error_count} failed\n"
+                    if error_count
+                    else f"Async extraction completed: {success_count} URL"
+                    f"{'' if success_count == 1 else 's'} processed\n"
+                ),
+                color="green",
+            )
+
+        return _format_results_for_llm(formatted), formatted

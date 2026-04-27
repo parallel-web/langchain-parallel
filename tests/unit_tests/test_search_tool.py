@@ -1,10 +1,18 @@
 """Unit tests for Parallel Search functionality."""
 
+from __future__ import annotations
+
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from langchain_parallel.search_tool import ParallelWebSearchTool
+from langchain_parallel.search_tool import ParallelWebSearchTool, _normalize_mode
+
+
+def _make_response(payload: dict) -> SimpleNamespace:
+    """Build a mock SDK response with .model_dump()."""
+    return SimpleNamespace(model_dump=lambda: dict(payload))
 
 
 class TestParallelWebSearchTool:
@@ -17,95 +25,194 @@ class TestParallelWebSearchTool:
         ):
             tool = ParallelWebSearchTool()
             assert tool.name == "parallel_web_search"
-            assert "Search the web using Parallel" in tool.description
+            assert "Search the web" in tool.description
+            assert tool.response_format == "content_and_artifact"
 
-    @patch("langchain_parallel.search_tool.get_search_client")
-    def test_tool_successful_search(self, mock_get_client: Mock) -> None:
-        """Test successful search execution."""
-        # Mock the search client
-        mock_client = Mock()
-        mock_client.search.return_value = {
-            "search_id": "test-123",
-            "results": [
-                {
-                    "url": "https://example.com",
-                    "title": "Test Result",
-                    "excerpts": ["Test excerpt"],
-                }
-            ],
-        }
-        mock_get_client.return_value = mock_client
-
-        with patch(
-            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
-        ):
-            tool = ParallelWebSearchTool()
-            result = tool._run(objective="test search")
-
-            assert result["search_id"] == "test-123"
-            assert len(result["results"]) == 1
-            assert result["results"][0]["title"] == "Test Result"
-
-    @patch("langchain_parallel.search_tool.get_search_client")
-    def test_tool_handles_api_error(self, mock_get_client: Mock) -> None:
-        """Test tool handles API errors gracefully."""
-        # Mock the search client to raise an exception
-        mock_client = Mock()
-        mock_client.search.side_effect = Exception("API Error")
-        mock_get_client.return_value = mock_client
-
-        with patch(
-            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
-        ):
-            tool = ParallelWebSearchTool()
-
-            with pytest.raises(
-                ValueError, match="Error calling Parallel Search API: API Error"
-            ):
-                tool._run(objective="test search")
-
-    @patch("langchain_parallel.search_tool.get_search_client")
-    def test_metadata_collection(self, mock_get_client: Mock) -> None:
-        """Test metadata collection."""
-        mock_client = Mock()
-        mock_client.search.return_value = {
-            "search_id": "test-123",
-            "results": [{"url": "https://example.com", "title": "Test"}],
-        }
-        mock_get_client.return_value = mock_client
-
-        with patch(
-            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
-        ):
-            tool = ParallelWebSearchTool()
-            result = tool._run(
-                search_queries=["query1", "query2"],
-                include_metadata=True,
-            )
-
-            assert "search_metadata" in result
-            metadata = result["search_metadata"]
-            assert "search_duration_seconds" in metadata
-            assert "query_count" in metadata
-            assert metadata["query_count"] == 2
-
-    @patch("langchain_parallel.search_tool.get_async_search_client")
-    async def test_async_functionality(self, mock_get_async_client: Mock) -> None:
-        """Test async search functionality."""
-        mock_client = Mock()
-        mock_client.search = AsyncMock(
-            return_value={
-                "search_id": "async-test-123",
-                "results": [{"url": "https://example.com", "title": "Async Test"}],
-            }
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    def test_run_uses_v1_endpoint_when_search_queries_provided(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """search_queries triggers the GA endpoint."""
+        sync_client = Mock()
+        sync_client.search.return_value = _make_response(
+            {
+                "search_id": "search-1",
+                "results": [
+                    {
+                        "url": "https://example.com",
+                        "title": "Test",
+                        "excerpts": ["snippet"],
+                    },
+                ],
+            },
         )
-        mock_get_async_client.return_value = mock_client
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
 
         with patch(
             "langchain_parallel.search_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelWebSearchTool()
-            result = await tool._arun(objective="test async search")
+            content, artifact = tool._run(
+                search_queries=["query 1"],
+                max_results=3,
+                mode="advanced",
+            )
+            sync_client.search.assert_called_once()
+            sync_client.beta.search.assert_not_called()
+            assert artifact["search_id"] == "search-1"
+            assert artifact["search_metadata"]["endpoint"] == "v1"
+            assert "Test" in content
 
-            assert result["search_id"] == "async-test-123"
-            assert len(result["results"]) == 1
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    def test_run_falls_back_to_beta_when_objective_only(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Objective without search_queries falls back to v1beta with a warning."""
+        sync_client = Mock()
+        sync_client.beta.search.return_value = _make_response(
+            {"search_id": "beta-1", "results": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelWebSearchTool()
+            with pytest.warns(DeprecationWarning, match="search_queries"):
+                _, artifact = tool._run(objective="What is AI?")
+            sync_client.beta.search.assert_called_once()
+            sync_client.search.assert_not_called()
+            assert artifact["search_metadata"]["endpoint"] == "v1beta"
+
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    def test_run_translates_legacy_mode(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Legacy mode strings are mapped with a DeprecationWarning."""
+        sync_client = Mock()
+        sync_client.search.return_value = _make_response(
+            {"search_id": "s", "results": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelWebSearchTool()
+            with pytest.warns(DeprecationWarning, match="legacy beta value"):
+                tool._run(search_queries=["q"], mode="agentic")
+            kwargs = sync_client.search.call_args.kwargs
+            assert kwargs["mode"] == "advanced"
+
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    def test_advanced_settings_envelope(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Flat settings flow into the GA `advanced_settings` envelope."""
+        sync_client = Mock()
+        sync_client.search.return_value = _make_response(
+            {"search_id": "s", "results": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelWebSearchTool()
+            tool._run(
+                search_queries=["q"],
+                source_policy={"include_domains": ["nature.com"]},
+                location="us",
+                max_results=15,
+            )
+            kwargs = sync_client.search.call_args.kwargs
+            assert kwargs["advanced_settings"] == {
+                "source_policy": {"include_domains": ["nature.com"]},
+                "max_results": 15,
+                "location": "us",
+            }
+
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    def test_run_handles_api_error(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """API exceptions are wrapped as ValueError."""
+        sync_client = Mock()
+        sync_client.search.side_effect = Exception("API Error")
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelWebSearchTool()
+            with pytest.raises(
+                ValueError,
+                match="Error calling Parallel Search API: API Error",
+            ):
+                tool._run(search_queries=["q"])
+
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    async def test_async_functionality(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """Async path uses the async client."""
+        async_client = Mock()
+        async_client.search = AsyncMock(
+            return_value=_make_response(
+                {
+                    "search_id": "async-1",
+                    "results": [{"url": "https://example.com", "title": "Async"}],
+                },
+            ),
+        )
+        mock_async_factory.return_value = async_client
+        mock_sync_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelWebSearchTool()
+            _, artifact = await tool._arun(search_queries=["q"])
+            assert artifact["search_id"] == "async-1"
+
+
+class TestNormalizeMode:
+    def test_passthrough(self) -> None:
+        assert _normalize_mode("basic") == "basic"
+        assert _normalize_mode("advanced") == "advanced"
+        assert _normalize_mode(None) is None
+
+    def test_legacy(self) -> None:
+        with pytest.warns(DeprecationWarning):
+            assert _normalize_mode("one-shot") == "basic"
+        with pytest.warns(DeprecationWarning):
+            assert _normalize_mode("agentic") == "advanced"
+        with pytest.warns(DeprecationWarning):
+            assert _normalize_mode("fast") == "basic"
+
+    def test_invalid(self) -> None:
+        with pytest.raises(ValueError, match="Invalid mode"):
+            _normalize_mode("nonsense")
