@@ -20,8 +20,10 @@ from langchain_parallel.search_tool import ParallelSearchTool, ParallelWebSearch
 from langchain_parallel.tasks import (
     McpServer,
     ParallelDeepResearch,
+    ParallelEnrichment,
     ParallelTaskGroup,
     ParallelTaskRunTool,
+    build_task_spec,
     verify_webhook,
 )
 
@@ -43,6 +45,7 @@ __all__ = [
     "McpServer",
     "MonitorWebhook",
     "ParallelDeepResearch",
+    "ParallelEnrichment",
     "ParallelExtractTool",
     "ParallelFindAllTool",
     "ParallelMonitor",
@@ -53,6 +56,7 @@ __all__ = [
     "ParallelWebSearchTool",
     "SourcePolicy",
     "__version__",
+    "build_task_spec",
     "parallel_mcp_toolkit",
     "verify_webhook",
 ]

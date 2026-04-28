@@ -435,11 +435,14 @@ for doc in docs:
 
 ## Task API
 
-The Task API exposes Parallel's research processors (`lite`, `base`, `core`, `pro`, `ultra`) and the `basis` citation graph. Three surfaces:
+The Task API exposes Parallel's research processors (`lite`, `base`, `core`, `core2x`, `pro`, `ultra`, `ultra2x/4x/8x`, plus matching `-fast` variants) and the `basis` citation graph. Four surfaces:
 
-- `ParallelTaskRunTool` — agent-callable tool for a single Task Run.
-- `ParallelDeepResearch` — `Runnable` wrapper that defaults to `core` and is the lower-friction path for deep-research questions.
-- `ParallelTaskGroup` — batch executor for fan-out/fan-in workloads.
+| | Single input | List of inputs |
+|---|---|---|
+| **Untyped** | `ParallelTaskRunTool` (`BaseTool` for agents) | `ParallelTaskGroup` (low-level batch primitive) |
+| **Typed (TaskSpec)** | `ParallelDeepResearch` (`Runnable`, defaults to `pro`) | `ParallelEnrichment` (`Runnable`, defaults to `core`) |
+
+`ParallelTaskRunTool` is the only surface designed for an LLM to call mid-conversation. The other three are application-side: `TaskGroup` is the manual primitive, and `DeepResearch` / `Enrichment` are opinionated `Runnable`s for the two most common patterns.
 
 ### Single Task with citations
 
@@ -458,11 +461,42 @@ print(result["run"]["run_id"])
 ```python
 from langchain_parallel import ParallelDeepResearch
 
-research = ParallelDeepResearch(processor="core")
+# Defaults to processor="pro" (Exploratory web research, 2-10 min).
+# For the most thorough report, pass processor="ultra" (5-25 min).
+research = ParallelDeepResearch()
 result = research.invoke("Latest developments in renewable energy storage")
 print(result["output"]["content"])
 for fact in result["output"].get("basis", []):
     print(fact["field"], "->", fact["citations"])
+```
+
+### Structured-batch enrichment
+
+```python
+from pydantic import BaseModel, Field
+from langchain_parallel import ParallelEnrichment
+
+class CompanyInput(BaseModel):
+    company: str = Field(description="Company name to enrich")
+
+class CompanyOutput(BaseModel):
+    headquarters: str
+    founding_year: int
+
+enricher = ParallelEnrichment(
+    input_schema=CompanyInput,
+    output_schema=CompanyOutput,
+    processor="core",  # the docs' recommended tier for enrichment
+)
+
+results = enricher.invoke([
+    CompanyInput(company="Anthropic"),
+    {"company": "OpenAI"},
+])
+for r in results:
+    print(r["output"]["content"])
+# {'headquarters': 'San Francisco, California, USA', 'founding_year': 2021}
+# {'headquarters': 'San Francisco, USA', 'founding_year': 2015}
 ```
 
 ### Structured output (pydantic)

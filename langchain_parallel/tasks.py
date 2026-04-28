@@ -1,6 +1,6 @@
 """LangChain integration for Parallel's Task API.
 
-Three primary surfaces:
+Four primary surfaces:
 
 - :class:`ParallelTaskRunTool` — agent-callable tool that runs a single
   Parallel Task synchronously (via ``client.task_run.execute``) and
@@ -9,10 +9,15 @@ Three primary surfaces:
   wrapper for deep-research tasks. Defaults to the ``core`` processor and
   always returns the full ``basis`` (citations + reasoning + confidence).
 - :class:`ParallelTaskGroup` — batch executor backed by the Task Group
-  API. Useful for bulk enrichment.
+  API. The general building block for fan-out/fan-in workloads.
+- :class:`ParallelEnrichment` — the structured-batch counterpart to
+  :class:`ParallelDeepResearch`. A typed Runnable that enriches a list
+  of records against a pydantic input/output schema using the Task
+  Group API under the hood.
 
-A :func:`verify_webhook` helper validates HMAC signatures on incoming
-Parallel webhooks.
+Helpers: :func:`build_task_spec` constructs a Task Spec dict from
+pydantic classes; :func:`verify_webhook` validates HMAC signatures on
+incoming Parallel webhooks.
 """
 
 from __future__ import annotations
@@ -68,6 +73,59 @@ ProcessorLiteral = Literal[
 ]
 
 _MCP_BETA_HEADER = "mcp-server-2025-07-17"
+
+
+_SDK_SCHEMA_TYPES = {"json", "text", "auto"}
+
+
+def _to_schema_param(
+    value: Union[type[BaseModel], dict[str, Any], str, None],
+) -> Optional[dict[str, Any]]:
+    """Normalize a schema value into the SDK's ``{type, ...}`` envelope.
+
+    Accepts:
+
+    - a pydantic ``BaseModel`` subclass → wrapped as a ``json`` envelope
+      whose ``json_schema`` is the class's ``model_json_schema()``
+    - a plain string → wrapped as ``{"type": "text", "description": value}``
+    - a dict already in SDK envelope shape (``type`` ∈ ``{json, text, auto}``)
+      → returned as-is
+    - any other dict (raw JSON schema) → wrapped as a ``json`` envelope
+    - ``None`` → ``None``
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return {"type": "text", "description": value}
+    if isinstance(value, type) and issubclass(value, BaseModel):
+        return {"type": "json", "json_schema": value.model_json_schema()}
+    if isinstance(value, dict):
+        # An "envelope" dict carries the SDK's discriminator type.
+        if value.get("type") in _SDK_SCHEMA_TYPES:
+            return dict(value)
+        # Otherwise treat the dict as a raw JSON schema and wrap it.
+        return {"type": "json", "json_schema": dict(value)}
+    msg = (
+        f"Unsupported schema type {type(value).__name__}: pass a pydantic "
+        f"BaseModel subclass, a JSON-schema dict, a str, or a fully-formed "
+        f"`{{type, ...}}` dict."
+    )
+    raise TypeError(msg)
+
+
+def build_task_spec(
+    *,
+    output_schema: Union[type[BaseModel], dict[str, Any], str],
+    input_schema: Union[type[BaseModel], dict[str, Any], str, None] = None,
+) -> dict[str, Any]:
+    """Build a ``TaskSpecParam`` dict from pydantic classes / schemas / text.
+
+    Mirrors the helper used in https://docs.parallel.ai/task-api/examples/task-enrichment.
+    """
+    spec: dict[str, Any] = {"output_schema": _to_schema_param(output_schema)}
+    if input_schema is not None:
+        spec["input_schema"] = _to_schema_param(input_schema)
+    return spec
 
 
 class McpServer(BaseModel):
@@ -490,25 +548,37 @@ class ParallelTaskRunTool(BaseTool):
 class ParallelDeepResearch(Runnable[Union[str, dict[str, Any]], dict[str, Any]]):
     """High-level Runnable for Parallel deep-research tasks.
 
-    Defaults to the ``core`` processor and always returns the full `basis`
-    (citations + reasoning + confidence). Lower friction than wiring up
+    Defaults to the ``pro`` processor -- the lower of the two tiers Parallel
+    optimizes for deep research per
+    https://docs.parallel.ai/task-api/guides/choose-a-processor (``"pro"``
+    = "Exploratory web research", 2-10 min). For the most thorough
+    multi-source investigative reports, pass ``processor="ultra"`` (5-25
+    min). For shorter, enrichment-style structured tasks, use
+    :class:`ParallelEnrichment` (which defaults to ``core``) or pass
+    ``processor="core"`` here.
+
+    Always returns the full ``basis`` (citations + reasoning + confidence)
+    on the result; lower friction than wiring up
     :class:`ParallelTaskRunTool` manually when all you want is "do deep
     research on this question."
 
     Example:
         ```python
-        research = ParallelDeepResearch(processor="core")
+        research = ParallelDeepResearch()  # processor="pro"
         result = research.invoke("Latest developments in renewable energy")
         print(result["output"]["content"])
         for fact in result["output"].get("basis", []):
             print(fact["field"], "->", fact["citations"])
+
+        # For the most thorough report:
+        research = ParallelDeepResearch(processor="ultra")
         ```
     """
 
     def __init__(
         self,
         *,
-        processor: ProcessorLiteral = "core",
+        processor: ProcessorLiteral = "pro",
         output_schema: Optional[Union[type[BaseModel], dict[str, Any], str]] = None,
         api_key: Optional[Union[str, SecretStr]] = None,
         base_url: str = "https://api.parallel.ai",
@@ -581,6 +651,14 @@ class ParallelTaskGroup(_TaskClientMixin):
     processor: ProcessorLiteral = Field(default="lite")
     """Default processor for runs added to this group."""
 
+    task_spec: Optional[dict[str, Any]] = Field(default=None)
+    """Optional ``default_task_spec`` applied to every run in the group.
+
+    Use :func:`build_task_spec` to construct this from pydantic classes,
+    or pass a dict directly. When set, every input added to the group
+    must conform to ``task_spec["input_schema"]``.
+    """
+
     metadata: Optional[dict[str, Union[str, float, bool]]] = Field(default=None)
 
     def _kick_off_runs(
@@ -595,10 +673,15 @@ class ParallelTaskGroup(_TaskClientMixin):
         run_inputs: list[Any] = [
             {"input": inp, "processor": self.processor} for inp in inputs
         ]
+        add_kwargs: dict[str, Any] = {
+            "inputs": run_inputs,
+            "refresh_status": True,
+        }
+        if self.task_spec is not None:
+            add_kwargs["default_task_spec"] = self.task_spec
         response = self._client.beta.task_group.add_runs(
             group.task_group_id,
-            inputs=run_inputs,
-            refresh_status=True,
+            **add_kwargs,
         )
         return list(response.run_ids or [])
 
@@ -615,10 +698,15 @@ class ParallelTaskGroup(_TaskClientMixin):
         run_inputs: list[Any] = [
             {"input": inp, "processor": self.processor} for inp in inputs
         ]
+        add_kwargs: dict[str, Any] = {
+            "inputs": run_inputs,
+            "refresh_status": True,
+        }
+        if self.task_spec is not None:
+            add_kwargs["default_task_spec"] = self.task_spec
         response = await self._async_client.beta.task_group.add_runs(
             group.task_group_id,
-            inputs=run_inputs,
-            refresh_status=True,
+            **add_kwargs,
         )
         return list(response.run_ids or [])
 
@@ -673,3 +761,111 @@ class ParallelTaskGroup(_TaskClientMixin):
         except Exception as e:
             msg = f"Error calling Parallel Task Group API: {e!s}"
             raise ValueError(msg) from e
+
+
+EnrichmentInput = Union[str, dict[str, Any], BaseModel]
+
+
+class ParallelEnrichment(
+    Runnable[list[EnrichmentInput], list[dict[str, Any]]],
+):
+    """High-level Runnable for the structured-batch enrichment pattern.
+
+    Wraps :class:`ParallelTaskGroup` with a ``default_task_spec`` so callers
+    can pass a list of records (pydantic instances or dicts) and get back a
+    list of enriched output dicts. Mirrors the canonical enrichment pattern
+    documented at
+    https://docs.parallel.ai/task-api/examples/task-enrichment.
+
+    Defaults to the ``core`` processor (the docs' recommendation for
+    enrichment workflows).
+
+    Example:
+        ```python
+        from pydantic import BaseModel, Field
+        from langchain_parallel import ParallelEnrichment
+
+        class CompanyInput(BaseModel):
+            company: str = Field(description="Company name to enrich")
+
+        class CompanyOutput(BaseModel):
+            headquarters: str
+            founding_year: int = Field(description="Year the company was founded")
+
+        enricher = ParallelEnrichment(
+            input_schema=CompanyInput,
+            output_schema=CompanyOutput,
+            processor="core",
+        )
+
+        results = enricher.invoke([
+            {"company": "Anthropic"},
+            {"company": "OpenAI"},
+            {"company": "Google DeepMind"},
+        ])
+
+        for inp, out in zip(["Anthropic", "OpenAI", "Google DeepMind"], results):
+            content = out["output"]["content"]
+            print(inp, "->", content)
+        ```
+    """
+
+    def __init__(
+        self,
+        *,
+        output_schema: Union[type[BaseModel], dict[str, Any], str],
+        input_schema: Union[type[BaseModel], dict[str, Any], str, None] = None,
+        processor: ProcessorLiteral = "core",
+        api_key: Optional[Union[str, SecretStr]] = None,
+        base_url: str = "https://api.parallel.ai",
+        metadata: Optional[dict[str, Union[str, float, bool]]] = None,
+    ) -> None:
+        # Note: avoid attribute names `input_schema` / `output_schema` because
+        # `Runnable` exposes them as read-only properties.
+        self.processor = processor
+        self._input_schema = input_schema
+        self._output_schema = output_schema
+        self._group = ParallelTaskGroup(
+            processor=processor,
+            api_key=(
+                api_key
+                if isinstance(api_key, SecretStr) or api_key is None
+                else SecretStr(api_key)
+            ),
+            base_url=base_url,
+            task_spec=build_task_spec(
+                output_schema=output_schema,
+                input_schema=input_schema,
+            ),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _coerce_inputs(
+        inputs: list[EnrichmentInput],
+    ) -> list[Union[str, dict[str, Any]]]:
+        coerced: list[Union[str, dict[str, Any]]] = []
+        for item in inputs:
+            if isinstance(item, BaseModel):
+                coerced.append(item.model_dump(exclude_none=True))
+            else:
+                coerced.append(item)
+        return coerced
+
+    def invoke(  # type: ignore[override]
+        self,
+        input: list[EnrichmentInput],  # noqa: A002
+        config: Any = None,
+        *,
+        timeout: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        return self._group.run(self._coerce_inputs(input), timeout=timeout)
+
+    async def ainvoke(  # type: ignore[override]
+        self,
+        input: list[EnrichmentInput],  # noqa: A002
+        config: Any = None,
+        *,
+        timeout: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        return await self._group.arun(self._coerce_inputs(input), timeout=timeout)

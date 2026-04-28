@@ -6,12 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import BaseModel, Field
 
 from langchain_parallel import (
     McpServer,
     ParallelDeepResearch,
+    ParallelEnrichment,
     ParallelTaskGroup,
     ParallelTaskRunTool,
+    build_task_spec,
     verify_webhook,
 )
 
@@ -251,3 +254,107 @@ def test_task_group_run(
     add_kwargs = sync_client.beta.task_group.add_runs.call_args.kwargs
     assert len(add_kwargs["inputs"]) == 3
     assert all(i["processor"] == "lite" for i in add_kwargs["inputs"])
+
+
+# --- build_task_spec ---
+
+
+class _CompanyIn(BaseModel):
+    company: str = Field(description="Company name")
+
+
+class _CompanyOut(BaseModel):
+    headquarters: str
+    founding_year: int
+
+
+def test_build_task_spec_pydantic() -> None:
+    spec = build_task_spec(input_schema=_CompanyIn, output_schema=_CompanyOut)
+    assert spec["output_schema"]["type"] == "json"
+    assert "headquarters" in spec["output_schema"]["json_schema"]["properties"]
+    assert spec["input_schema"]["type"] == "json"
+    assert "company" in spec["input_schema"]["json_schema"]["properties"]
+
+
+def test_build_task_spec_mixed_shapes() -> None:
+    """Strings become text schemas; raw dicts are wrapped as json schemas."""
+    spec = build_task_spec(
+        input_schema="A natural-language description of the input",
+        output_schema={"type": "object", "properties": {"x": {"type": "integer"}}},
+    )
+    assert spec["input_schema"]["type"] == "text"
+    assert spec["input_schema"]["description"].startswith("A natural-language")
+    assert spec["output_schema"]["type"] == "json"
+    assert spec["output_schema"]["json_schema"]["properties"]["x"]["type"] == "integer"
+
+
+# --- ParallelEnrichment ---
+
+
+@patch("langchain_parallel.tasks.get_parallel_client")
+@patch("langchain_parallel.tasks.get_async_parallel_client")
+def test_enrichment_invoke(
+    mock_async: Mock,
+    mock_sync: Mock,
+) -> None:
+    """Coerces pydantic inputs, passes default_task_spec to add_runs."""
+    sync_client = Mock()
+    sync_client.beta.task_group.create.return_value = SimpleNamespace(
+        task_group_id="tg-en-1",
+    )
+    sync_client.beta.task_group.add_runs.return_value = SimpleNamespace(
+        run_ids=["r1", "r2"],
+    )
+    sync_client.task_run.result.side_effect = [
+        _result(
+            {
+                "output": {
+                    "content": {
+                        "headquarters": "San Francisco, CA",
+                        "founding_year": 2021,
+                    },
+                },
+            },
+        ),
+        _result(
+            {
+                "output": {
+                    "content": {
+                        "headquarters": "San Francisco, CA",
+                        "founding_year": 2015,
+                    },
+                },
+            },
+        ),
+    ]
+    mock_sync.return_value = sync_client
+    mock_async.return_value = Mock()
+
+    with patch("langchain_parallel.tasks.get_api_key", return_value="k"):
+        enricher = ParallelEnrichment(
+            input_schema=_CompanyIn,
+            output_schema=_CompanyOut,
+            processor="core",
+        )
+        results = enricher.invoke(
+            [
+                _CompanyIn(company="Anthropic"),
+                {"company": "OpenAI"},
+            ],
+        )
+
+    # `default_task_spec` was passed to add_runs.
+    add_kwargs = sync_client.beta.task_group.add_runs.call_args.kwargs
+    assert "default_task_spec" in add_kwargs
+    spec = add_kwargs["default_task_spec"]
+    assert spec["input_schema"]["type"] == "json"
+    assert spec["output_schema"]["type"] == "json"
+    # Pydantic input got coerced to a dict.
+    inputs = add_kwargs["inputs"]
+    assert inputs[0]["input"] == {"company": "Anthropic"}
+    assert inputs[1]["input"] == {"company": "OpenAI"}
+    # Each run uses the configured processor.
+    assert all(i["processor"] == "core" for i in inputs)
+    # Results come back in the same order.
+    assert results[0]["output"]["content"]["founding_year"] == 2021
+    assert results[1]["output"]["content"]["founding_year"] == 2015
