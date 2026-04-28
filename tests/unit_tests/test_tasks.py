@@ -23,18 +23,88 @@ def _result(payload: dict) -> SimpleNamespace:
 # --- verify_webhook ---
 
 
-def test_verify_webhook_success() -> None:
+def _sign(payload: bytes, webhook_id: str, ts: str, secret: str) -> str:
+    import base64
     import hashlib
     import hmac
 
+    signed = f"{webhook_id}.{ts}.{payload.decode()}"
+    digest = hmac.new(secret.encode(), signed.encode(), hashlib.sha256).digest()
+    return base64.b64encode(digest).decode()
+
+
+def test_verify_webhook_success() -> None:
+    import time
+
     payload = b'{"run_id":"abc"}'
     secret = "sek"  # noqa: S105 - test fixture
-    sig = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-    assert verify_webhook(payload, sig, secret) is True
+    wid = "msg_1"
+    ts = str(int(time.time()))
+    sig = _sign(payload, wid, ts, secret)
+    assert (
+        verify_webhook(
+            payload,
+            webhook_id=wid,
+            webhook_timestamp=ts,
+            webhook_signature=f"v1,{sig}",
+            secret=secret,
+        )
+        is True
+    )
+
+
+def test_verify_webhook_multiple_signatures() -> None:
+    """Header carrying multiple `v1,<sig>` entries: match if any matches."""
+    import time
+
+    payload = b'{"x":1}'
+    secret = "sek"  # noqa: S105
+    wid, ts = "msg", str(int(time.time()))
+    good = _sign(payload, wid, ts, secret)
+    header = f"v1,deadbeef v1,{good}"
+    assert (
+        verify_webhook(
+            payload,
+            webhook_id=wid,
+            webhook_timestamp=ts,
+            webhook_signature=header,
+            secret=secret,
+        )
+        is True
+    )
+
+
+def test_verify_webhook_replay_rejected() -> None:
+    """Timestamps outside tolerance are rejected."""
+    payload = b"{}"
+    secret = "sek"  # noqa: S105
+    old_ts = "1000000000"  # well in the past
+    sig = _sign(payload, "m", old_ts, secret)
+    assert (
+        verify_webhook(
+            payload,
+            webhook_id="m",
+            webhook_timestamp=old_ts,
+            webhook_signature=f"v1,{sig}",
+            secret=secret,
+        )
+        is False
+    )
 
 
 def test_verify_webhook_failure() -> None:
-    assert verify_webhook(b"x", "deadbeef", "sek") is False
+    import time
+
+    assert (
+        verify_webhook(
+            b"x",
+            webhook_id="m",
+            webhook_timestamp=str(int(time.time())),
+            webhook_signature="v1,deadbeef",
+            secret="sek",  # noqa: S106
+        )
+        is False
+    )
 
 
 # --- ParallelTaskRunTool ---

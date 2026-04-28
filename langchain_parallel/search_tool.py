@@ -11,7 +11,7 @@ from langchain_core.callbacks import (
 )
 from langchain_core.tools import BaseTool
 from parallel import AsyncParallel, Parallel
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from ._client import get_api_key, get_async_parallel_client, get_parallel_client
 from ._types import ExcerptSettings, FetchPolicy, SourcePolicy
@@ -66,18 +66,36 @@ def _build_advanced_settings(
     return settings or None
 
 
+_MAX_QUERY_LEN = 200
+
+
 class ParallelWebSearchInput(BaseModel):
     """Input schema for ParallelWeb search tool."""
 
+    @field_validator("search_queries", check_fields=False)
+    @classmethod
+    def _check_query_length(cls, qs: list[str]) -> list[str]:
+        too_long = [q for q in qs if len(q) > _MAX_QUERY_LEN]
+        if too_long:
+            msg = (
+                f"search_queries must each be <= {_MAX_QUERY_LEN} characters; "
+                f"got {len(too_long)} too-long entries."
+            )
+            raise ValueError(msg)
+        return qs
+
     objective: Optional[str] = Field(
         default=None,
+        max_length=5000,
         description=(
             "Natural-language description of the research goal. Up to 5000 "
-            "characters. Include any source or freshness guidance. Recommended "
-            "alongside `search_queries` for best results."
+            "characters. Include any source or freshness guidance. Pair with "
+            "`search_queries` for best results."
         ),
     )
     search_queries: list[str] = Field(
+        min_length=1,
+        max_length=5,
         description=(
             "Required. 1-5 keyword search queries (3-6 words each, up to "
             "200 characters). Pair with an optional `objective` for best "
@@ -86,6 +104,8 @@ class ParallelWebSearchInput(BaseModel):
     )
     max_results: int = Field(
         default=10,
+        ge=1,
+        le=40,
         description="Maximum number of search results to return (1 to 40).",
     )
     excerpts: Optional[ExcerptSettings] = Field(

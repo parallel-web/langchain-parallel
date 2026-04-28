@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import datetime as _dt
+from typing import Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ExcerptSettings(BaseModel):
@@ -38,10 +39,11 @@ class FetchPolicy(BaseModel):
 
     max_age_seconds: Optional[int] = Field(
         default=None,
+        ge=600,
         description=(
-            "Maximum age of cached content in seconds to trigger a live fetch. "
-            "Minimum value 600 seconds (10 minutes). If not provided, dynamic "
-            "age policy will be used."
+            "If cached content is older than this, fetch fresh content from the "
+            "source. Minimum 600 seconds (10 minutes); if not provided, the API "
+            "uses a dynamic age policy."
         ),
     )
     timeout_seconds: Optional[float] = Field(
@@ -61,10 +63,15 @@ class FetchPolicy(BaseModel):
 
 
 class SourcePolicy(BaseModel):
-    """Domain allow/deny lists and freshness floor for web research."""
+    """Domain allow/deny lists and freshness floor for web research.
+
+    Apex-domain semantics: include `nature.com`, not `https://www.nature.com`.
+    Wildcards permitted (e.g. `.org`).
+    """
 
     include_domains: Optional[list[str]] = Field(
         default=None,
+        max_length=200,
         description=(
             "If provided, only sources from these apex domains are returned. "
             "Combined include + exclude lists are capped at 200 domains."
@@ -72,12 +79,37 @@ class SourcePolicy(BaseModel):
     )
     exclude_domains: Optional[list[str]] = Field(
         default=None,
+        max_length=200,
         description="If provided, sources from these apex domains are excluded.",
     )
-    after_date: Optional[str] = Field(
+    after_date: Optional[Union[_dt.date, str]] = Field(
         default=None,
         description=(
             "ISO date (YYYY-MM-DD). Only return sources published on or after "
             "this date."
         ),
     )
+
+    @field_validator("after_date", mode="before")
+    @classmethod
+    def _parse_after_date(cls, v: object) -> object:
+        if v is None or isinstance(v, _dt.date):
+            return v
+        if isinstance(v, str):
+            try:
+                return _dt.date.fromisoformat(v)
+            except ValueError as e:
+                msg = f"after_date must be ISO YYYY-MM-DD; got {v!r} ({e!s})."
+                raise ValueError(msg) from e
+        return v
+
+    @model_validator(mode="after")
+    def _check_domain_total(self) -> SourcePolicy:
+        total = len(self.include_domains or []) + len(self.exclude_domains or [])
+        if total > 200:
+            msg = (
+                f"Combined include_domains + exclude_domains has {total} entries; "
+                f"the API caps the total at 200."
+            )
+            raise ValueError(msg)
+        return self

@@ -28,7 +28,7 @@ def test_findall_tool_run(
     sync_client.beta.findall.create.return_value = SimpleNamespace(findall_id="fa-1")
     # `retrieve()` is polled until the run is no longer active.
     sync_client.beta.findall.retrieve.return_value = SimpleNamespace(
-        status=SimpleNamespace(is_active=False, status="completed"),
+        status=SimpleNamespace(status="completed"),
     )
     sync_client.beta.findall.result.return_value = _result(
         {
@@ -93,6 +93,6 @@ def test_findall_wraps_errors(
                     "match_conditions": [
                         FindAllMatchCondition(name="a", description="?"),
                     ],
-                    "match_limit": 1,
+                    "match_limit": 5,  # ge=5 minimum
                 },
             )

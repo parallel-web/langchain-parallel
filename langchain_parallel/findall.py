@@ -8,6 +8,7 @@ candidates with citations.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from typing import Any, Literal, Optional
 
@@ -21,9 +22,38 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 
 from ._client import get_api_key, get_async_parallel_client, get_parallel_client
 
+# Preview generator caps match_limit at 10; we still allow up to 1000 in the
+# input schema and validate against the chosen generator at call time.
+_PREVIEW_MAX_LIMIT = 10
 _DEFAULT_POLL_TIMEOUT = 600.0
 _POLL_INITIAL = 2.0
 _POLL_MAX = 10.0
+
+FindAllEventType = Literal[
+    "findall.candidate.generated",
+    "findall.candidate.matched",
+    "findall.candidate.unmatched",
+    "findall.candidate.enriched",
+    "findall.run.completed",
+    "findall.run.cancelled",
+    "findall.run.failed",
+]
+
+
+class FindAllWebhook(BaseModel):
+    """Webhook config for a FindAll run."""
+
+    url: str = Field(description="HTTPS URL the run will POST events to.")
+    event_types: Optional[list[FindAllEventType]] = Field(
+        default=None,
+        description="Optional subset of event types to forward. Defaults to all.",
+    )
+
+    def to_sdk(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"url": self.url}
+        if self.event_types is not None:
+            out["event_types"] = list(self.event_types)
+        return out
 
 
 class FindAllMatchCondition(BaseModel):
@@ -72,14 +102,28 @@ class ParallelFindAllInput(BaseModel):
         ),
     )
     match_conditions: list[FindAllMatchCondition] = Field(
+        min_length=1,
         description="Boolean conditions every candidate must satisfy.",
     )
     match_limit: int = Field(
-        description="Maximum number of matching candidates to return.",
+        ge=5,
+        le=1000,
+        description=(
+            "Maximum number of matching candidates to return. Must be in "
+            "[5, 1000]; the `preview` generator further caps this at 10."
+        ),
     )
     exclude_list: Optional[list[FindAllExcludeEntry]] = Field(
         default=None,
-        description="Entities to skip (use to refresh runs without re-discovering).",
+        description=(
+            "Entities to skip (use to refresh runs without re-discovering). "
+            "URL matching is sensitive to canonicalization; use the same "
+            "URL form across runs."
+        ),
+    )
+    webhook: Optional[FindAllWebhook] = Field(
+        default=None,
+        description="Optional webhook to receive run/candidate events.",
     )
     metadata: Optional[dict[str, Any]] = Field(default=None)
     timeout: Optional[float] = Field(
@@ -135,9 +179,17 @@ class ParallelFindAllTool(BaseTool):
         ```
 
     Returns:
-        ``{"run_id": str, "candidates": list[dict], "status": str, ...}``.
-        Each candidate carries `name`, `url`, the per-condition match
-        results, and any enrichment fields configured on the run.
+        Dict with ``candidates`` (list), ``run`` (status info), and
+        ``last_event_id``. Each candidate carries:
+
+        - ``candidate_id``, ``name``, ``url``, ``description``
+        - ``match_status``: ``"generated" | "matched" | "unmatched"``
+        - ``output``: ``{<name>: {"type": "match_condition" | "enrichment",
+          "value": <bool|...>, "is_matched": <bool>}}``
+        - ``basis``: list of citations / reasoning per output field
+
+        Note: the ``preview`` generator returns at most 10 candidates and
+        does not support enrichments, cancellation, or extension.
     """
 
     name: str = "parallel_findall"
@@ -174,8 +226,16 @@ class ParallelFindAllTool(BaseTool):
         match_conditions: list[FindAllMatchCondition],
         match_limit: int,
         exclude_list: Optional[list[FindAllExcludeEntry]],
+        webhook: Optional[FindAllWebhook],
         metadata: Optional[dict[str, Any]],
     ) -> dict[str, Any]:
+        if self.generator == "preview" and match_limit > _PREVIEW_MAX_LIMIT:
+            msg = (
+                f"The 'preview' generator caps match_limit at "
+                f"{_PREVIEW_MAX_LIMIT}; got {match_limit}. Use 'base', "
+                f"'core', or 'pro' for larger runs."
+            )
+            raise ValueError(msg)
         kwargs: dict[str, Any] = {
             "objective": objective,
             "entity_type": entity_type,
@@ -185,6 +245,8 @@ class ParallelFindAllTool(BaseTool):
         }
         if exclude_list:
             kwargs["exclude_list"] = [e.to_sdk() for e in exclude_list]
+        if webhook is not None:
+            kwargs["webhook"] = webhook.to_sdk()
         if metadata is not None:
             kwargs["metadata"] = metadata
         return kwargs
@@ -192,12 +254,16 @@ class ParallelFindAllTool(BaseTool):
     def _format_result(self, result: Any) -> dict[str, Any]:
         return result.model_dump() if hasattr(result, "model_dump") else dict(result)
 
-    def _wait_for_completion(self, findall_id: str, timeout: float) -> None:
+    _TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed"})
+
+    def _wait_for_completion(self, findall_id: str, timeout: float) -> str:
         """Poll ``retrieve()`` until the run terminates (or we time out).
 
-        FindAll runs are typically multi-minute; the SDK's
-        ``client.beta.findall.result()`` does *not* long-poll the server,
-        so we drive the polling loop ourselves.
+        Returns the terminal status string (``"completed"``, ``"cancelled"``,
+        or ``"failed"``).
+
+        On timeout, attempts a best-effort ``cancel()`` and re-raises
+        ``TimeoutError``.
         """
         if self._client is None:
             msg = "Parallel client not initialized."
@@ -206,18 +272,22 @@ class ParallelFindAllTool(BaseTool):
         wait = _POLL_INITIAL
         while True:
             info = self._client.beta.findall.retrieve(findall_id)
-            if not info.status.is_active:
-                return
+            status = info.status.status
+            if status in self._TERMINAL_STATUSES:
+                return status
             if time.monotonic() >= deadline:
+                # Best-effort cancel so we don't leak the run server-side.
+                with contextlib.suppress(Exception):
+                    self._client.beta.findall.cancel(findall_id)
                 msg = (
                     f"FindAll run {findall_id} did not complete within "
-                    f"{timeout}s (last status: {info.status.status})."
+                    f"{timeout}s (last status: {status})."
                 )
                 raise TimeoutError(msg)
             time.sleep(wait)
             wait = min(wait * 1.5, _POLL_MAX)
 
-    async def _await_completion(self, findall_id: str, timeout: float) -> None:
+    async def _await_completion(self, findall_id: str, timeout: float) -> str:
         if self._async_client is None:
             msg = "Async Parallel client not initialized."
             raise RuntimeError(msg)
@@ -225,16 +295,35 @@ class ParallelFindAllTool(BaseTool):
         wait = _POLL_INITIAL
         while True:
             info = await self._async_client.beta.findall.retrieve(findall_id)
-            if not info.status.is_active:
-                return
+            status = info.status.status
+            if status in self._TERMINAL_STATUSES:
+                return status
             if time.monotonic() >= deadline:
+                with contextlib.suppress(Exception):
+                    await self._async_client.beta.findall.cancel(findall_id)
                 msg = (
                     f"FindAll run {findall_id} did not complete within "
-                    f"{timeout}s (last status: {info.status.status})."
+                    f"{timeout}s (last status: {status})."
                 )
                 raise TimeoutError(msg)
             await asyncio.sleep(wait)
             wait = min(wait * 1.5, _POLL_MAX)
+
+    def cancel(self, findall_id: str) -> dict[str, Any]:
+        """Cancel a running FindAll run."""
+        if self._client is None:
+            msg = "Parallel client not initialized."
+            raise RuntimeError(msg)
+        result: Any = self._client.beta.findall.cancel(findall_id)
+        return result.model_dump() if hasattr(result, "model_dump") else dict(result)
+
+    async def acancel(self, findall_id: str) -> dict[str, Any]:
+        """Async cancel a running FindAll run."""
+        if self._async_client is None:
+            msg = "Async Parallel client not initialized."
+            raise RuntimeError(msg)
+        result: Any = await self._async_client.beta.findall.cancel(findall_id)
+        return result.model_dump() if hasattr(result, "model_dump") else dict(result)
 
     def _run(
         self,
@@ -243,6 +332,7 @@ class ParallelFindAllTool(BaseTool):
         match_conditions: list[FindAllMatchCondition],
         match_limit: int,
         exclude_list: Optional[list[FindAllExcludeEntry]] = None,
+        webhook: Optional[FindAllWebhook] = None,
         metadata: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
         run_manager: Optional[CallbackManagerForToolRun] = None,
@@ -256,14 +346,18 @@ class ParallelFindAllTool(BaseTool):
             match_conditions=match_conditions,
             match_limit=match_limit,
             exclude_list=exclude_list,
+            webhook=webhook,
             metadata=metadata,
         )
         poll_timeout = timeout if timeout is not None else _DEFAULT_POLL_TIMEOUT
         try:
             run = self._client.beta.findall.create(**kwargs)
-            self._wait_for_completion(run.findall_id, poll_timeout)
+            status = self._wait_for_completion(run.findall_id, poll_timeout)
+            if status == "failed":
+                msg = f"FindAll run {run.findall_id} terminated with status=failed."
+                raise ValueError(msg)
             result = self._client.beta.findall.result(run.findall_id)
-        except TimeoutError:
+        except (TimeoutError, ValueError):
             raise
         except Exception as e:
             msg = f"Error calling Parallel FindAll API: {e!s}"
@@ -277,6 +371,7 @@ class ParallelFindAllTool(BaseTool):
         match_conditions: list[FindAllMatchCondition],
         match_limit: int,
         exclude_list: Optional[list[FindAllExcludeEntry]] = None,
+        webhook: Optional[FindAllWebhook] = None,
         metadata: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
@@ -290,14 +385,18 @@ class ParallelFindAllTool(BaseTool):
             match_conditions=match_conditions,
             match_limit=match_limit,
             exclude_list=exclude_list,
+            webhook=webhook,
             metadata=metadata,
         )
         poll_timeout = timeout if timeout is not None else _DEFAULT_POLL_TIMEOUT
         try:
             run = await self._async_client.beta.findall.create(**kwargs)
-            await self._await_completion(run.findall_id, poll_timeout)
+            status = await self._await_completion(run.findall_id, poll_timeout)
+            if status == "failed":
+                msg = f"FindAll run {run.findall_id} terminated with status=failed."
+                raise ValueError(msg)
             result = await self._async_client.beta.findall.result(run.findall_id)
-        except TimeoutError:
+        except (TimeoutError, ValueError):
             raise
         except Exception as e:
             msg = f"Error calling Parallel FindAll API: {e!s}"

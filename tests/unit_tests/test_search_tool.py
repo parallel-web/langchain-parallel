@@ -141,7 +141,7 @@ class TestParallelWebSearchTool:
                 },
                 "source_policy": {
                     "include_domains": ["nature.com"],
-                    "after_date": "2025-01-01",
+                    "after_date": __import__("datetime").date(2025, 1, 1),
                 },
                 "max_results": 15,
                 "location": "us",

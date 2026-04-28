@@ -71,10 +71,13 @@ class ParallelExtractInput(BaseModel):
     """Input schema for Parallel Extract Tool."""
 
     urls: list[str] = Field(
+        min_length=1,
+        max_length=20,
         description="List of URLs to extract content from. Up to 20 per request.",
     )
     search_objective: Optional[str] = Field(
         default=None,
+        max_length=5000,
         description=(
             "Natural-language objective to focus extraction. Up to 5000 characters."
         ),
@@ -377,8 +380,20 @@ class ParallelExtractTool(BaseTool):
             msg = f"Error calling Parallel Extract API: {e!s}"
             raise ValueError(msg) from e
 
-        formatted = self._format_response(response_obj.model_dump())
+        envelope = response_obj.model_dump()
+        formatted = self._format_response(envelope)
         if run_manager:
+            for warning in envelope.get("warnings") or []:
+                warning_msg = (
+                    warning.get("message")
+                    if isinstance(warning, dict)
+                    else str(warning)
+                )
+                if warning_msg:
+                    run_manager.on_text(
+                        f"[warning] {warning_msg}\n",
+                        color="yellow",
+                    )
             run_manager.on_text(
                 self._completion_text(formatted, async_=False),
                 color="green",
@@ -434,8 +449,20 @@ class ParallelExtractTool(BaseTool):
             msg = f"Error calling Parallel Extract API: {e!s}"
             raise ValueError(msg) from e
 
-        formatted = self._format_response(response_obj.model_dump())
+        envelope = response_obj.model_dump()
+        formatted = self._format_response(envelope)
         if run_manager:
+            for warning in envelope.get("warnings") or []:
+                warning_msg = (
+                    warning.get("message")
+                    if isinstance(warning, dict)
+                    else str(warning)
+                )
+                if warning_msg:
+                    await run_manager.on_text(
+                        f"[warning] {warning_msg}\n",
+                        color="yellow",
+                    )
             await run_manager.on_text(
                 self._completion_text(formatted, async_=True),
                 color="green",
