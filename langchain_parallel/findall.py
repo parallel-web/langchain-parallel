@@ -7,6 +7,8 @@ candidates with citations.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, Literal, Optional
 
 from langchain_core.callbacks import (
@@ -18,6 +20,10 @@ from parallel import AsyncParallel, Parallel
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
 from ._client import get_api_key, get_async_parallel_client, get_parallel_client
+
+_DEFAULT_POLL_TIMEOUT = 600.0
+_POLL_INITIAL = 2.0
+_POLL_MAX = 10.0
 
 
 class FindAllMatchCondition(BaseModel):
@@ -186,6 +192,50 @@ class ParallelFindAllTool(BaseTool):
     def _format_result(self, result: Any) -> dict[str, Any]:
         return result.model_dump() if hasattr(result, "model_dump") else dict(result)
 
+    def _wait_for_completion(self, findall_id: str, timeout: float) -> None:
+        """Poll ``retrieve()`` until the run terminates (or we time out).
+
+        FindAll runs are typically multi-minute; the SDK's
+        ``client.beta.findall.result()`` does *not* long-poll the server,
+        so we drive the polling loop ourselves.
+        """
+        if self._client is None:
+            msg = "Parallel client not initialized."
+            raise RuntimeError(msg)
+        deadline = time.monotonic() + timeout
+        wait = _POLL_INITIAL
+        while True:
+            info = self._client.beta.findall.retrieve(findall_id)
+            if not info.status.is_active:
+                return
+            if time.monotonic() >= deadline:
+                msg = (
+                    f"FindAll run {findall_id} did not complete within "
+                    f"{timeout}s (last status: {info.status.status})."
+                )
+                raise TimeoutError(msg)
+            time.sleep(wait)
+            wait = min(wait * 1.5, _POLL_MAX)
+
+    async def _await_completion(self, findall_id: str, timeout: float) -> None:
+        if self._async_client is None:
+            msg = "Async Parallel client not initialized."
+            raise RuntimeError(msg)
+        deadline = time.monotonic() + timeout
+        wait = _POLL_INITIAL
+        while True:
+            info = await self._async_client.beta.findall.retrieve(findall_id)
+            if not info.status.is_active:
+                return
+            if time.monotonic() >= deadline:
+                msg = (
+                    f"FindAll run {findall_id} did not complete within "
+                    f"{timeout}s (last status: {info.status.status})."
+                )
+                raise TimeoutError(msg)
+            await asyncio.sleep(wait)
+            wait = min(wait * 1.5, _POLL_MAX)
+
     def _run(
         self,
         objective: str,
@@ -208,12 +258,13 @@ class ParallelFindAllTool(BaseTool):
             exclude_list=exclude_list,
             metadata=metadata,
         )
+        poll_timeout = timeout if timeout is not None else _DEFAULT_POLL_TIMEOUT
         try:
             run = self._client.beta.findall.create(**kwargs)
-            result = self._client.beta.findall.result(
-                run.findall_id,
-                timeout=timeout,
-            )
+            self._wait_for_completion(run.findall_id, poll_timeout)
+            result = self._client.beta.findall.result(run.findall_id)
+        except TimeoutError:
+            raise
         except Exception as e:
             msg = f"Error calling Parallel FindAll API: {e!s}"
             raise ValueError(msg) from e
@@ -241,12 +292,13 @@ class ParallelFindAllTool(BaseTool):
             exclude_list=exclude_list,
             metadata=metadata,
         )
+        poll_timeout = timeout if timeout is not None else _DEFAULT_POLL_TIMEOUT
         try:
             run = await self._async_client.beta.findall.create(**kwargs)
-            result = await self._async_client.beta.findall.result(
-                run.findall_id,
-                timeout=timeout,
-            )
+            await self._await_completion(run.findall_id, poll_timeout)
+            result = await self._async_client.beta.findall.result(run.findall_id)
+        except TimeoutError:
+            raise
         except Exception as e:
             msg = f"Error calling Parallel FindAll API: {e!s}"
             raise ValueError(msg) from e

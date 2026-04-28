@@ -69,7 +69,6 @@ def focused_extraction_examples() -> None:
             "search_objective": (
                 "What are the main applications and ethical concerns of AI?"
             ),
-            "excerpts": True,
             "full_content": False,
         }
     )
@@ -88,7 +87,6 @@ def focused_extraction_examples() -> None:
                 "training algorithms",
                 "applications",
             ],
-            "excerpts": True,
         }
     )
 

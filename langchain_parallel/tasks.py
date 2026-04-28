@@ -185,8 +185,11 @@ class ParallelTaskRunTool(BaseTool):
 
         tool = ParallelTaskRunTool(processor="lite")
         result = tool.invoke({"input": "Who founded SpaceX, in one sentence?"})
-        print(result["output"])
-        print(result["basis"])  # citations on lite/base/core/etc.
+        # The structured output is at result["output"]["content"]; per-field
+        # citations are at result["output"]["basis"]; the run id is at
+        # result["run"]["run_id"].
+        print(result["output"]["content"])
+        print(result["output"]["basis"])
         ```
     """
 
@@ -359,8 +362,8 @@ class ParallelDeepResearch(Runnable[Union[str, dict[str, Any]], dict[str, Any]])
         ```python
         research = ParallelDeepResearch(processor="core")
         result = research.invoke("Latest developments in renewable energy")
-        print(result["output"])
-        for fact in result.get("basis", []):
+        print(result["output"]["content"])
+        for fact in result["output"].get("basis", []):
             print(fact["field"], "->", fact["citations"])
         ```
     """

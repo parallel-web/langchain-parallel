@@ -448,8 +448,9 @@ from langchain_parallel import ParallelTaskRunTool
 
 tool = ParallelTaskRunTool(processor="lite")
 result = tool.invoke({"input": "Who founded SpaceX, in one sentence?"})
-print(result["output"])
-print(result["basis"])  # per-field citations + reasoning + confidence
+print(result["output"]["content"])
+print(result["output"]["basis"])  # per-field citations + reasoning + confidence
+print(result["run"]["run_id"])
 ```
 
 ### Deep research (Runnable)
@@ -459,8 +460,8 @@ from langchain_parallel import ParallelDeepResearch
 
 research = ParallelDeepResearch(processor="core")
 result = research.invoke("Latest developments in renewable energy storage")
-print(result["output"])
-for fact in result.get("basis", []):
+print(result["output"]["content"])
+for fact in result["output"].get("basis", []):
     print(fact["field"], "->", fact["citations"])
 ```
 

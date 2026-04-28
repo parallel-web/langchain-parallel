@@ -26,6 +26,10 @@ def test_findall_tool_run(
 ) -> None:
     sync_client = Mock()
     sync_client.beta.findall.create.return_value = SimpleNamespace(findall_id="fa-1")
+    # `retrieve()` is polled until the run is no longer active.
+    sync_client.beta.findall.retrieve.return_value = SimpleNamespace(
+        status=SimpleNamespace(is_active=False, status="completed"),
+    )
     sync_client.beta.findall.result.return_value = _result(
         {
             "findall_id": "fa-1",

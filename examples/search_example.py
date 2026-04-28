@@ -184,7 +184,6 @@ def display_metadata(result: dict[str, Any]) -> None:
         return
     metadata = result["search_metadata"]
     print("\n  Search Metadata:")
-    print(f"    Endpoint: {metadata.get('endpoint', 'N/A')}")
     print(f"    Duration: {metadata.get('search_duration_seconds', 'N/A')}s")
     print(f"    Results: {metadata.get('actual_results_returned', 'N/A')}")
 
