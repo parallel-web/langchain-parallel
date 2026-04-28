@@ -1,17 +1,24 @@
 # LangChain Parallel Web Integration
 
-This package provides LangChain integrations for [Parallel](https://docs.parallel.ai/), enabling real-time web research and AI capabilities through an OpenAI-compatible interface.
+This package provides LangChain integrations for [Parallel](https://docs.parallel.ai/), covering Parallel's full developer-facing API surface.
 
 ## Features
 
-- **Chat Models**: `ChatParallel` (formerly `ChatParallelWeb`) — real-time web research chat completions, with citations and structured output on the research models.
-- **Search Tool**: `ParallelSearchTool` (formerly `ParallelWebSearchTool`) — direct access to Parallel's GA `/v1/search` endpoint.
-- **Extract Tool**: `ParallelExtractTool` — clean content extraction from web pages via `/v1/extract`.
-- **Streaming Support**: Real-time response streaming on chat.
-- **Async/Await**: Full asynchronous operation support.
-- **LangChain Integration**: Pydantic input schemas, `bind`-able tools, `with_structured_output()`, `lc_serializable`.
+| Surface | Class | Backed by |
+|---|---|---|
+| Chat completions with citations + structured output | [`ChatParallel`](#chat-models) | `/chat/completions` (lite/base/core) |
+| Web search → Documents (RAG) | [`ParallelSearchRetriever`](#retriever-rag) | `/v1/search` |
+| Web search tool (agents) | [`ParallelSearchTool`](#search-api) | `/v1/search` |
+| Web content extraction | [`ParallelExtractTool`](#extract-api) | `/v1/extract` |
+| Single Task Run + citations | [`ParallelTaskRunTool`](#task-api) | `/v1/tasks/runs` |
+| Deep-research Runnable | [`ParallelDeepResearch`](#task-api) | `/v1/tasks/runs` |
+| Bulk task batching | [`ParallelTaskGroup`](#task-api) | `/v1beta/tasks/groups` |
+| Entity discovery | [`ParallelFindAllTool`](#findall-api) | `/v1beta/findall` |
+| Scheduled web monitors | [`ParallelMonitor`](#monitor-api-alpha) | `/v1alpha/monitors` |
+| Hosted MCP servers as LangChain tools | [`parallel_mcp_toolkit()`](#mcp-toolkit) | `search.parallel.ai` + `task-mcp.parallel.ai` |
+| Webhook signature verification | [`verify_webhook()`](#webhook-signature-verification) | HMAC-SHA256 |
 
-> Note: the older names (`ChatParallelWeb`, `ParallelWebSearchTool`) continue to work as aliases.
+> Old names (`ChatParallelWeb`, `ParallelWebSearchTool`) continue to work as aliases for `ChatParallel` and `ParallelSearchTool`.
 
 ## Installation
 
@@ -402,6 +409,196 @@ async def extract_async():
 
 # Run async extraction
 result = asyncio.run(extract_async())
+```
+
+## Retriever (RAG)
+
+`ParallelSearchRetriever` is a `BaseRetriever` that returns Parallel Search results as `Document`s. Drops in to any LangChain RAG pipeline.
+
+```python
+from langchain_parallel import ParallelSearchRetriever, SourcePolicy
+
+retriever = ParallelSearchRetriever(
+    max_results=5,
+    mode="advanced",
+    source_policy=SourcePolicy(include_domains=["nature.com", "arxiv.org"]),
+    objective="Focus on peer-reviewed material",  # forwarded on every call
+)
+
+docs = retriever.invoke("recent advances in protein folding")
+for doc in docs:
+    print(doc.metadata["title"], "-", doc.metadata["url"])
+    print(doc.page_content[:200])
+```
+
+`Document.metadata` carries `url`, `title`, `publish_date`, `search_id`, the original `excerpts` list, and the `query` that produced the document.
+
+## Task API
+
+The Task API exposes Parallel's research processors (`lite`, `base`, `core`, `pro`, `ultra`) and the `basis` citation graph. Three surfaces:
+
+- `ParallelTaskRunTool` — agent-callable tool for a single Task Run.
+- `ParallelDeepResearch` — `Runnable` wrapper that defaults to `core` and is the lower-friction path for deep-research questions.
+- `ParallelTaskGroup` — batch executor for fan-out/fan-in workloads.
+
+### Single Task with citations
+
+```python
+from langchain_parallel import ParallelTaskRunTool
+
+tool = ParallelTaskRunTool(processor="lite")
+result = tool.invoke({"input": "Who founded SpaceX, in one sentence?"})
+print(result["output"])
+print(result["basis"])  # per-field citations + reasoning + confidence
+```
+
+### Deep research (Runnable)
+
+```python
+from langchain_parallel import ParallelDeepResearch
+
+research = ParallelDeepResearch(processor="core")
+result = research.invoke("Latest developments in renewable energy storage")
+print(result["output"])
+for fact in result.get("basis", []):
+    print(fact["field"], "->", fact["citations"])
+```
+
+### Structured output (pydantic)
+
+```python
+from pydantic import BaseModel, Field
+from langchain_parallel import ParallelTaskRunTool
+
+class CompanyFacts(BaseModel):
+    name: str
+    founded: int = Field(description="Year the company was founded")
+    headquarters: str
+
+tool = ParallelTaskRunTool(
+    processor="base",
+    task_output_schema=CompanyFacts,
+)
+result = tool.invoke({"input": "Tell me about Anthropic"})
+print(result["parsed"])  # CompanyFacts instance, fields populated
+```
+
+### Batch (Task Group)
+
+```python
+from langchain_parallel import ParallelTaskGroup
+
+group = ParallelTaskGroup(processor="lite")
+results = group.run([
+    "Founder of Anthropic?",
+    "Founder of OpenAI?",
+    "Founder of Google DeepMind?",
+])
+for r in results:
+    print(r["output"])
+```
+
+### BYOMCP (bring-your-own MCP servers)
+
+```python
+from langchain_parallel import McpServer, ParallelTaskRunTool
+
+tool = ParallelTaskRunTool(
+    processor="base",
+    mcp_servers=[
+        McpServer(
+            name="my_internal_data",
+            url="https://mcp.example.com/internal",
+            headers={"Authorization": "Bearer ..."},
+        ),
+    ],
+)
+```
+
+## FindAll API
+
+Discover entities from the web that satisfy a natural-language objective plus boolean match conditions.
+
+```python
+from langchain_parallel import (
+    ParallelFindAllTool,
+    FindAllMatchCondition,
+)
+
+tool = ParallelFindAllTool(generator="base")
+result = tool.invoke({
+    "objective": "AI agent startups founded after 2023",
+    "entity_type": "company",
+    "match_conditions": [
+        FindAllMatchCondition(
+            name="founded_after_2023",
+            description="Was this company founded after January 1 2023?",
+        ),
+        FindAllMatchCondition(
+            name="builds_ai_agents",
+            description="Does this company build AI agents as a core product?",
+        ),
+    ],
+    "match_limit": 25,
+})
+for candidate in result["candidates"]:
+    print(candidate["name"], "-", candidate["url"])
+```
+
+Generators: `preview` (small free sample), `base`, `core`, `pro` (highest quality, longest-running).
+
+## Monitor API (alpha)
+
+Schedule recurring web queries that emit webhook events on change. The Monitor API is **alpha**; shapes may change without notice. The current SDK doesn't expose this surface, so `ParallelMonitor` talks to `/v1alpha/monitors` directly.
+
+```python
+from langchain_parallel import ParallelMonitor, MonitorWebhook
+
+monitors = ParallelMonitor()
+
+m = monitors.create(
+    query="Track new SEC filings related to Anthropic",
+    frequency="1h",
+    webhook=MonitorWebhook(
+        url="https://example.com/parallel-webhook",
+        secret="...",  # used to HMAC-sign payloads
+    ),
+)
+
+events = monitors.list_events(m["monitor_id"])
+print(len(events["event_groups"]))
+```
+
+## Webhook signature verification
+
+Validates HMAC-SHA256 signatures on incoming Task Run / FindAll / Monitor webhooks.
+
+```python
+from langchain_parallel import verify_webhook
+
+@app.post("/parallel-webhook")
+async def webhook(request):
+    body = await request.body()
+    signature = request.headers["parallel-signature"]
+    if not verify_webhook(body, signature, secret="..."):
+        return Response(status_code=401)
+    # ... process the event
+```
+
+## MCP toolkit
+
+Wrap Parallel's hosted MCP servers (Search MCP + Task MCP) as LangChain `BaseTool`s. Useful when you want to mix Parallel tools with other MCP servers in the same agent runtime, or when you've standardized on MCP for cross-language reasons. For Python-only use cases, the native tools above are simpler and don't require the extra dependency.
+
+```bash
+pip install "langchain-parallel[mcp]"  # pulls in langchain-mcp-adapters
+```
+
+```python
+from langchain_parallel import parallel_mcp_toolkit
+
+tools = await parallel_mcp_toolkit()  # returns list[BaseTool]
+# Includes: web_search, web_fetch (Search MCP);
+#           createDeepResearch, createTaskGroup, getStatus, getResultMarkdown (Task MCP)
 ```
 
 ## Error Handling

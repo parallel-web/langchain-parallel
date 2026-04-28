@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "langchain-parallel"
-version = "0.3.0"
+version = "0.4.0"
 description = "A LangChain integration for Parallel Web AI services, including Chat and Search."
 authors = ["Parallel Team <support@parallel.ai>"]
 readme = "README.md"
@@ -47,6 +47,11 @@ openai = "^1.88.0"
 pydantic = "^2.11.7"
 httpx = ">=0.28.1,<1.0.0"
 parallel-web = "^0.5.1"
+# Optional: enables `parallel_mcp_toolkit()` for the hosted MCP servers.
+langchain-mcp-adapters = { version = "^0.1.0", optional = true }
+
+[tool.poetry.extras]
+mcp = ["langchain-mcp-adapters"]
 
 [tool.ruff]
 target-version = "py310"

@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-28
+
+This is a feature release covering Phase 2 of the modernization roadmap. Adds five new public surfaces (retriever, Task API, FindAll, Monitor, MCP toolkit) and removes the deprecation paths that 0.3.0 introduced.
+
+### Added
+
+- **`ParallelSearchRetriever`** — `BaseRetriever` returning `list[Document]` with rich `metadata` (`url`, `title`, `publish_date`, `search_id`, `excerpts`, `query`). Drops in to any RAG pipeline. Sync + async.
+- **Task API** (`langchain_parallel.tasks`):
+  - `ParallelTaskRunTool` — agent-callable tool that runs a single Parallel Task synchronously via `client.task_run.execute(...)`. Surfaces the structured output, `basis` citations, and run id. Supports the full processor menu (`lite`, `base`, `core`, `core2x`, `pro`, `ultra`, `ultra2x/4x/8x`).
+  - `ParallelDeepResearch` — `Runnable[str|dict, dict]` wrapper defaulting to the `core` processor; lower-friction shape for "do deep research on this question."
+  - `ParallelTaskGroup` — batch runner that creates a Task Group, fans out runs, and collects all results. Useful for bulk enrichment.
+  - **BYOMCP support** — pass `mcp_servers=[McpServer(...)]` to `ParallelTaskRunTool` / `ParallelDeepResearch` to expose your own Streamable-HTTP MCP endpoints to the run.
+  - **Webhook signature verification** — `verify_webhook(payload, signature, secret)` HMAC-SHA256 helper for incoming `task_run.status` webhooks.
+- **`ParallelFindAllTool`** (`langchain_parallel.findall`) — entity discovery via `client.beta.findall.create` + `result`. Returns ranked candidates that satisfy a natural-language objective and a set of boolean match conditions. Generators: `preview`, `base`, `core`, `pro`. Sync + async.
+- **`ParallelMonitor`** (`langchain_parallel.monitors`) — thin httpx wrapper around `/v1alpha/monitors`. Create / retrieve / update / delete monitors; list event groups; simulate events. The Parallel SDK (0.5.1) does not yet expose this surface, so this module talks to the API directly. The Monitor API is **alpha** and shapes may change without notice.
+- **`parallel_mcp_toolkit()`** (`langchain_parallel.mcp`) — factory that returns Parallel's hosted Search MCP and Task MCP tools as LangChain `BaseTool`s, via the optional `langchain-mcp-adapters` dependency. Install with `pip install "langchain-parallel[mcp]"`. Useful when you want to mix Parallel tools with other MCP servers in the same agent runtime.
+
+### Removed
+
+- **`mode="one-shot"` / `"agentic"` / `"fast"`** — the legacy `mode` strings deprecated in 0.3.0 are removed. Use `mode="basic"` (formerly `one-shot`/`fast`) or `mode="advanced"` (formerly `agentic`).
+- **Search `objective`-only call (no `search_queries`)** — the `/v1beta` fallback path deprecated in 0.3.0 is removed. `search_queries` is now a required field on `ParallelWebSearchInput`. Pass at least one keyword query alongside any `objective`.
+- **`Extract.excerpts=False`** — the no-op DeprecationWarning path is removed. The field is now `Optional[ExcerptSettings]` (was `Union[bool, ExcerptSettings]`); pass `ExcerptSettings(max_chars_per_result=…)` to control per-result size, or omit the field for the API default.
+- **`search_metadata["endpoint"]`** key — no longer emitted (the v1beta fallback that introduced it is gone).
+
+### Changed
+
+- `pyproject.toml`: added optional extra `[mcp]` pulling in `langchain-mcp-adapters` for the MCP toolkit.
+
+### Migration from 0.3.x
+
+```python
+# 0.3.x (DeprecationWarning, still worked)        # 0.4.x
+tool.invoke({"objective": "..."})                 # tool.invoke({"search_queries": ["..."], "objective": "..."})
+tool.invoke({"mode": "one-shot", ...})            # tool.invoke({"mode": "basic", ...})
+tool.invoke({"mode": "agentic", ...})             # tool.invoke({"mode": "advanced", ...})
+extract_tool.invoke({..., "excerpts": False})     # extract_tool.invoke({...})  # excerpts always returned in v1
+```
+
+The new surfaces are all additive — existing 0.3.x code that was warning-free continues to work without changes.
+
 ## [0.3.0] - 2026-04-27
 
 This release migrates Search and Extract to Parallel's v1 GA endpoints, surfaces citations + structured output on the chat model, and bumps the SDK to `0.5.1`.
