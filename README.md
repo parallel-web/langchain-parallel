@@ -440,17 +440,19 @@ The Task API exposes Parallel's research processors (`lite`, `base`, `core`, `co
 
 | | Single input | List of inputs |
 |---|---|---|
-| **Untyped** | `ParallelTaskRunTool` (`BaseTool` for agents) | `ParallelTaskGroup` (low-level batch primitive) |
-| **Typed (TaskSpec)** | `ParallelDeepResearch` (`Runnable`, defaults to `pro`) | `ParallelEnrichment` (`Runnable`, defaults to `core`) |
+| **Untyped** | `ParallelTaskRunTool` (`BaseTool` for agents, defaults to `lite-fast`) | `ParallelTaskGroup` (low-level batch primitive, defaults to `lite-fast`) |
+| **Typed (TaskSpec)** | `ParallelDeepResearch` (`Runnable`, defaults to `pro-fast`) | `ParallelEnrichment` (`Runnable`, defaults to `core-fast`) |
 
 `ParallelTaskRunTool` is the only surface designed for an LLM to call mid-conversation. The other three are application-side: `TaskGroup` is the manual primitive, and `DeepResearch` / `Enrichment` are opinionated `Runnable`s for the two most common patterns.
+
+> All four default to a **`-fast`** processor variant. The `-fast` family is 2-5x faster than the corresponding non-fast tier at similar accuracy and is the right pick for agent-loop / interactive workflows. Strip the suffix (`processor="pro"`, `processor="ultra"`, etc.) when latency is less of a concern than maximum quality.
 
 ### Single Task with citations
 
 ```python
 from langchain_parallel import ParallelTaskRunTool
 
-tool = ParallelTaskRunTool(processor="lite")
+tool = ParallelTaskRunTool()  # defaults to processor="lite-fast"
 result = tool.invoke({"input": "Who founded SpaceX, in one sentence?"})
 print(result["output"]["content"])
 print(result["output"]["basis"])  # per-field citations + reasoning + confidence
@@ -462,7 +464,8 @@ print(result["run"]["run_id"])
 ```python
 from langchain_parallel import ParallelDeepResearch
 
-# Defaults to processor="pro" (Exploratory web research, 2-10 min).
+# Defaults to processor="pro-fast" (the -fast variant of pro,
+# Exploratory web research, 2-5x faster than "pro" at similar accuracy).
 # For the most thorough report, pass processor="ultra" (5-25 min).
 research = ParallelDeepResearch()
 result = research.invoke("Latest developments in renewable energy storage")
@@ -487,7 +490,8 @@ class CompanyOutput(BaseModel):
 enricher = ParallelEnrichment(
     input_schema=CompanyInput,
     output_schema=CompanyOutput,
-    processor="core",  # the docs' recommended tier for enrichment
+    # Defaults to processor="core-fast"; pass "core" or "pro" for higher
+    # accuracy when latency is less of a concern.
 )
 
 results = enricher.invoke([
@@ -524,7 +528,7 @@ print(result["parsed"])  # CompanyFacts instance, fields populated
 ```python
 from langchain_parallel import ParallelTaskGroup
 
-group = ParallelTaskGroup(processor="lite")
+group = ParallelTaskGroup()  # defaults to processor="lite-fast"
 results = group.run([
     "Founder of Anthropic?",
     "Founder of OpenAI?",

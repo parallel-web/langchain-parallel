@@ -110,6 +110,22 @@ def test_verify_webhook_failure() -> None:
     )
 
 
+# --- Default processors ---
+
+
+def test_default_processors_are_fast_variants() -> None:
+    """All four Task surfaces default to a `-fast` processor variant."""
+
+    class _Out(BaseModel):
+        x: int
+
+    with patch("langchain_parallel.tasks.get_api_key", return_value="k"):
+        assert ParallelTaskRunTool().processor == "lite-fast"
+        assert ParallelDeepResearch().processor == "pro-fast"
+        assert ParallelTaskGroup().processor == "lite-fast"
+        assert ParallelEnrichment(output_schema=_Out).processor == "core-fast"
+
+
 # --- ParallelTaskRunTool ---
 
 

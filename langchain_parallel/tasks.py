@@ -293,9 +293,12 @@ class ParallelTaskRunTool(BaseTool):
 
     Key init args:
         processor: Literal[...]
-            Which Parallel processor to run. ``"lite"`` is fastest;
-            ``"core"``/``"pro"`` for deep research; ``"ultra"`` family for
-            the highest-quality long-running tasks.
+            Which Parallel processor to run. Defaults to ``"lite-fast"`` —
+            the ``-fast`` variants are 2–5x faster than their non-fast
+            counterparts at similar accuracy. Use ``"core"`` / ``"pro"``
+            for deep research and ``"ultra"`` for the highest-quality
+            long-running tasks. Add ``-fast`` to any tier for
+            agent-loop-friendly latency.
         output_schema: Optional[type[BaseModel] | dict | str]
             If a pydantic class, the SDK parses the response into an instance
             of the class. If a dict, it's used as the JSON schema. If a
@@ -309,7 +312,7 @@ class ParallelTaskRunTool(BaseTool):
         ```python
         from langchain_parallel import ParallelTaskRunTool
 
-        tool = ParallelTaskRunTool(processor="lite")
+        tool = ParallelTaskRunTool()  # processor="lite-fast"
         result = tool.invoke({"input": "Who founded SpaceX, in one sentence?"})
         # The structured output is at result["output"]["content"]; per-field
         # citations are at result["output"]["basis"]; the run id is at
@@ -330,8 +333,15 @@ class ParallelTaskRunTool(BaseTool):
     api_key: Optional[SecretStr] = Field(default=None)
     base_url: str = Field(default="https://api.parallel.ai")
 
-    processor: ProcessorLiteral = Field(default="lite")
-    """Which processor to run (lite, base, core, pro, ultra family)."""
+    processor: ProcessorLiteral = Field(default="lite-fast")
+    """Which processor to run.
+
+    Defaults to ``"lite-fast"``. The ``-fast`` variants are 2-5x faster
+    than their non-fast counterparts at similar accuracy and are the
+    right pick for agent-loop / interactive workflows. Strip the suffix
+    (``"lite"``, ``"core"``, etc.) when latency is less of a concern
+    than maximum quality.
+    """
 
     task_output_schema: Optional[Union[type[BaseModel], dict[str, Any], str]] = None
     """Output spec: pydantic class, JSON-schema dict, or text description.
@@ -548,14 +558,13 @@ class ParallelTaskRunTool(BaseTool):
 class ParallelDeepResearch(Runnable[Union[str, dict[str, Any]], dict[str, Any]]):
     """High-level Runnable for Parallel deep-research tasks.
 
-    Defaults to the ``pro`` processor -- the lower of the two tiers Parallel
-    optimizes for deep research per
-    https://docs.parallel.ai/task-api/guides/choose-a-processor (``"pro"``
-    = "Exploratory web research", 2-10 min). For the most thorough
-    multi-source investigative reports, pass ``processor="ultra"`` (5-25
-    min). For shorter, enrichment-style structured tasks, use
-    :class:`ParallelEnrichment` (which defaults to ``core``) or pass
-    ``processor="core"`` here.
+    Defaults to the ``pro-fast`` processor -- the ``-fast`` variant of
+    ``pro`` ("Exploratory web research") at 2-5x the speed for similar
+    accuracy. Drop the ``-fast`` suffix (``processor="pro"``, 2-10 min)
+    or step up to ``processor="ultra"`` (5-25 min) for the most thorough
+    multi-source investigative reports. For shorter, enrichment-style
+    structured tasks, use :class:`ParallelEnrichment` or pass
+    ``processor="core-fast"`` here.
 
     Always returns the full ``basis`` (citations + reasoning + confidence)
     on the result; lower friction than wiring up
@@ -564,7 +573,7 @@ class ParallelDeepResearch(Runnable[Union[str, dict[str, Any]], dict[str, Any]])
 
     Example:
         ```python
-        research = ParallelDeepResearch()  # processor="pro"
+        research = ParallelDeepResearch()  # processor="pro-fast"
         result = research.invoke("Latest developments in renewable energy")
         print(result["output"]["content"])
         for fact in result["output"].get("basis", []):
@@ -578,7 +587,7 @@ class ParallelDeepResearch(Runnable[Union[str, dict[str, Any]], dict[str, Any]])
     def __init__(
         self,
         *,
-        processor: ProcessorLiteral = "pro",
+        processor: ProcessorLiteral = "pro-fast",
         output_schema: Optional[Union[type[BaseModel], dict[str, Any], str]] = None,
         api_key: Optional[Union[str, SecretStr]] = None,
         base_url: str = "https://api.parallel.ai",
@@ -635,7 +644,7 @@ class ParallelTaskGroup(_TaskClientMixin):
 
     Example:
         ```python
-        group = ParallelTaskGroup(processor="lite")
+        group = ParallelTaskGroup()  # processor="lite-fast"
         results = group.run(
             inputs=[
                 "Founder of Anthropic?",
@@ -648,8 +657,13 @@ class ParallelTaskGroup(_TaskClientMixin):
         ```
     """
 
-    processor: ProcessorLiteral = Field(default="lite")
-    """Default processor for runs added to this group."""
+    processor: ProcessorLiteral = Field(default="lite-fast")
+    """Default processor for runs added to this group.
+
+    Defaults to ``"lite-fast"``. Strip the ``-fast`` suffix
+    (``"lite"``, ``"core"``, etc.) when latency is less of a concern
+    than maximum quality.
+    """
 
     task_spec: Optional[dict[str, Any]] = Field(default=None)
     """Optional ``default_task_spec`` applied to every run in the group.
@@ -795,7 +809,8 @@ class ParallelEnrichment(
         enricher = ParallelEnrichment(
             input_schema=CompanyInput,
             output_schema=CompanyOutput,
-            processor="core",
+            # Defaults to processor="core-fast"; pass "core" or "pro" for
+            # higher accuracy when latency is less of a concern.
         )
 
         results = enricher.invoke([
@@ -815,7 +830,7 @@ class ParallelEnrichment(
         *,
         output_schema: Union[type[BaseModel], dict[str, Any], str],
         input_schema: Union[type[BaseModel], dict[str, Any], str, None] = None,
-        processor: ProcessorLiteral = "core",
+        processor: ProcessorLiteral = "core-fast",
         api_key: Optional[Union[str, SecretStr]] = None,
         base_url: str = "https://api.parallel.ai",
         metadata: Optional[dict[str, Union[str, float, bool]]] = None,
