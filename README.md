@@ -522,6 +522,20 @@ result = tool.invoke({"input": "Tell me about Anthropic"})
 print(result["parsed"])  # CompanyFacts instance, fields populated
 ```
 
+### `parse_basis()` — citations + low-confidence fields, in one call
+
+Every Task-surface result carries a `basis` (per-field citations + reasoning + confidence). `parse_basis()` walks it for you and returns the three things consumers actually want:
+
+```python
+from langchain_parallel import ParallelDeepResearch, parse_basis
+
+result = ParallelDeepResearch().invoke("Founder of SpaceX, in one sentence?")
+parsed = parse_basis(result)
+# parsed["citations_by_field"] -> {field_name: [citation, ...]}
+# parsed["low_confidence_fields"] -> ["year", ...]  # confidence == "low"
+# parsed["interaction_id"] -> str | None  # for multi-turn chaining
+```
+
 ### Batch (Task Group)
 
 ```python

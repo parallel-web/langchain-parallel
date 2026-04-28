@@ -15,6 +15,7 @@ from langchain_parallel import (
     ParallelTaskGroup,
     ParallelTaskRunTool,
     build_task_spec,
+    parse_basis,
     verify_webhook,
 )
 
@@ -108,6 +109,75 @@ def test_verify_webhook_failure() -> None:
         )
         is False
     )
+
+
+# --- parse_basis ---
+
+
+def test_parse_basis_top_level() -> None:
+    """Basis at the top level (TaskRunTool typed-output shape)."""
+    result = {
+        "run": {"run_id": "tr-1", "interaction_id": "iact_1"},
+        "output": {"founder": "Elon Musk", "year": 2002},
+        "basis": [
+            {
+                "field": "founder",
+                "confidence": "high",
+                "citations": [{"url": "https://example.com/a"}],
+            },
+            {
+                "field": "year",
+                "confidence": "low",
+                "citations": [{"url": "https://example.com/b"}],
+            },
+        ],
+    }
+    parsed = parse_basis(result)
+    assert parsed["citations_by_field"]["founder"][0]["url"] == "https://example.com/a"
+    assert parsed["low_confidence_fields"] == ["year"]
+    assert parsed["interaction_id"] == "iact_1"
+
+
+def test_parse_basis_nested_under_output() -> None:
+    """Basis nested under `output` (DeepResearch / structured-output shape)."""
+    result = {
+        "interaction_id": "iact_top",
+        "output": {
+            "content": {"capital": "Paris"},
+            "basis": [
+                {"field": "capital", "confidence": "MEDIUM", "citations": []},
+            ],
+        },
+    }
+    parsed = parse_basis(result)
+    assert parsed["citations_by_field"] == {"capital": []}
+    assert parsed["low_confidence_fields"] == []
+    assert parsed["interaction_id"] == "iact_top"
+
+
+def test_parse_basis_handles_missing_basis() -> None:
+    """No basis present → empty results, no errors."""
+    parsed = parse_basis({"output": "free text", "run": {"run_id": "tr-x"}})
+    assert parsed == {
+        "citations_by_field": {},
+        "low_confidence_fields": [],
+        "interaction_id": None,
+    }
+
+
+def test_parse_basis_skips_malformed_entries() -> None:
+    """Non-dict entries and entries without a `field` are ignored."""
+    result = {
+        "basis": [
+            "not a dict",
+            {"confidence": "low"},  # missing field
+            {"field": "", "confidence": "low"},  # blank field
+            {"field": "ok", "confidence": "low", "citations": [{"url": "u"}]},
+        ],
+    }
+    parsed = parse_basis(result)
+    assert parsed["citations_by_field"] == {"ok": [{"url": "u"}]}
+    assert parsed["low_confidence_fields"] == ["ok"]
 
 
 # --- Default processors ---

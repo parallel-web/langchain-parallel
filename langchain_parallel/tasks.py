@@ -231,6 +231,90 @@ def verify_webhook(
     return False
 
 
+def _extract_basis(result: dict[str, Any]) -> list[Any]:
+    """Pull the basis list out of a Task result.
+
+    The basis can sit at the top level (`result["basis"]`) or nested under
+    `result["output"]["basis"]` depending on the surface and whether a
+    structured output schema was used.
+    """
+    direct = result.get("basis")
+    if isinstance(direct, list):
+        return direct
+    output = result.get("output")
+    if isinstance(output, dict):
+        nested = output.get("basis")
+        if isinstance(nested, list):
+            return nested
+    return []
+
+
+def parse_basis(result: dict[str, Any]) -> dict[str, Any]:
+    """Extract citations, low-confidence fields, and `interaction_id`.
+
+    Saves Task-API consumers the boilerplate of walking the result shape to
+    pull out per-field citations, find which fields the model wasn't sure
+    about, and grab the `interaction_id` for multi-turn chaining.
+
+    Works on results from :class:`ParallelTaskRunTool`,
+    :class:`ParallelDeepResearch`, and individual entries from
+    :class:`ParallelTaskGroup` / :class:`ParallelEnrichment` batches.
+
+    Args:
+        result: A Task result dict — the value returned by ``.invoke()`` /
+            ``.run()`` on a Task surface, or one entry from a batch surface.
+
+    Returns:
+        Dict with three keys:
+
+        - ``citations_by_field``: ``{field_name: [citation_dict, ...]}``
+          keyed by the output-schema field. Empty when there's no basis.
+        - ``low_confidence_fields``: list of field names whose
+          ``confidence`` is ``"low"`` (case-insensitive). Empty when all
+          fields are medium/high or unset.
+        - ``interaction_id``: the run's `interaction_id` for chaining
+          (or ``None`` if the API didn't return one).
+
+    Example:
+        ```python
+        from langchain_parallel import ParallelDeepResearch, parse_basis
+
+        result = ParallelDeepResearch().invoke("Founder of SpaceX?")
+        parsed = parse_basis(result)
+        for field in parsed["low_confidence_fields"]:
+            print(f"low confidence: {field}")
+        for field, cites in parsed["citations_by_field"].items():
+            print(f"{field}: {len(cites)} citation(s)")
+        ```
+    """
+    basis = _extract_basis(result)
+
+    citations_by_field: dict[str, list[dict[str, Any]]] = {}
+    low_confidence: list[str] = []
+    for entry in basis:
+        if not isinstance(entry, dict):
+            continue
+        field = entry.get("field")
+        if not isinstance(field, str) or not field:
+            continue
+        citations_by_field[field] = list(entry.get("citations") or [])
+        confidence = entry.get("confidence")
+        if isinstance(confidence, str) and confidence.lower() == "low":
+            low_confidence.append(field)
+
+    interaction_id = result.get("interaction_id")
+    if not interaction_id:
+        run = result.get("run")
+        if isinstance(run, dict):
+            interaction_id = run.get("interaction_id") or None
+
+    return {
+        "citations_by_field": citations_by_field,
+        "low_confidence_fields": low_confidence,
+        "interaction_id": interaction_id,
+    }
+
+
 class _TaskClientMixin(BaseModel):
     """Shared API-key + client plumbing for the Task surfaces."""
 
@@ -294,7 +378,7 @@ class ParallelTaskRunTool(BaseTool):
     Key init args:
         processor: Literal[...]
             Which Parallel processor to run. Defaults to ``"lite-fast"`` —
-            the ``-fast`` variants are 2–5x faster than their non-fast
+            the ``-fast`` variants are 2-5x faster than their non-fast
             counterparts at similar accuracy. Use ``"core"`` / ``"pro"``
             for deep research and ``"ultra"`` for the highest-quality
             long-running tasks. Add ``-fast`` to any tier for

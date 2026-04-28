@@ -30,6 +30,10 @@ DEFAULT_NOTEBOOKS = [
     DOCS / "chat.ipynb",
     DOCS / "search_tool.ipynb",
     DOCS / "extract_tool.ipynb",
+    DOCS / "retriever.ipynb",
+    DOCS / "task_api.ipynb",
+    DOCS / "findall.ipynb",
+    DOCS / "monitor.ipynb",
 ]
 
 
@@ -39,7 +43,7 @@ def _is_interactive_cell(source: str) -> bool:
     return stripped.startswith(("%pip", "!pip")) or "getpass.getpass" in source
 
 
-def run_notebook(path: Path, *, timeout: int = 180) -> bool:
+def run_notebook(path: Path, *, timeout: int = 600) -> bool:
     """Execute a notebook in-place and report whether it succeeded."""
     nb = nbformat.read(path, as_version=4)
 
@@ -75,8 +79,8 @@ def main() -> int:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=180,
-        help="Per-cell timeout in seconds (default 180)",
+        default=600,
+        help="Per-cell timeout in seconds (default 600)",
     )
     args = parser.parse_args()
 

@@ -23,6 +23,7 @@ from langchain_parallel.tasks import (
     ParallelTaskGroup,
     ParallelTaskRunTool,
     build_task_spec,
+    parse_basis,
     verify_webhook,
 )
 
@@ -56,5 +57,6 @@ __all__ = [
     "SourcePolicy",
     "__version__",
     "build_task_spec",
+    "parse_basis",
     "verify_webhook",
 ]
