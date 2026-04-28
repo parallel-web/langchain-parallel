@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Any, Optional, Union
 
 from langchain_core.callbacks import (
@@ -37,33 +36,16 @@ def _coerce_full_content(
 
 
 def _coerce_excerpts(
-    excerpts: Union[bool, ExcerptSettings, dict[str, Any], None],
+    excerpts: Optional[ExcerptSettings],
 ) -> Optional[dict[str, Any]]:
-    """Resolve the legacy ``Union[bool, ExcerptSettings]`` excerpts arg.
+    """Convert an ExcerptSettings to a kwargs dict, or None.
 
-    In v1 GA, excerpts are always returned and the API has no flag to disable
-    them — only their per-result size is configurable. We accept the legacy
-    boolean for backward compatibility:
-
-    - ``None`` / ``True``: no excerpt-size override (API uses its default).
-    - ``False``: warn (the API can no longer disable excerpts) and treat as
-      no override.
-    - ``ExcerptSettings`` / ``dict``: pass through to advanced_settings.
+    The GA Extract API always returns excerpts; this controls only per-result
+    size. ``None`` means no override (API default).
     """
-    if excerpts is None or excerpts is True:
+    if excerpts is None:
         return None
-    if excerpts is False:
-        warnings.warn(
-            "excerpts=False is no longer supported — the GA Extract API "
-            "always returns excerpts. Use ExcerptSettings(max_chars_per_result=…) "
-            "to control per-result size.",
-            DeprecationWarning,
-            stacklevel=4,
-        )
-        return None
-    if isinstance(excerpts, ExcerptSettings):
-        return excerpts.model_dump(exclude_none=True)
-    return {k: v for k, v in excerpts.items() if v is not None}
+    return excerpts.model_dump(exclude_none=True)
 
 
 def _build_advanced_settings(
@@ -89,10 +71,13 @@ class ParallelExtractInput(BaseModel):
     """Input schema for Parallel Extract Tool."""
 
     urls: list[str] = Field(
+        min_length=1,
+        max_length=20,
         description="List of URLs to extract content from. Up to 20 per request.",
     )
     search_objective: Optional[str] = Field(
         default=None,
+        max_length=5000,
         description=(
             "Natural-language objective to focus extraction. Up to 5000 characters."
         ),
@@ -101,13 +86,12 @@ class ParallelExtractInput(BaseModel):
         default=None,
         description="Keyword queries to focus extracted content.",
     )
-    excerpts: Union[bool, ExcerptSettings] = Field(
-        default=True,
+    excerpts: Optional[ExcerptSettings] = Field(
+        default=None,
         description=(
-            "Include excerpts from each URL. In v1 GA, excerpts are always "
-            "returned; the boolean is kept for backward compatibility and "
-            "controls nothing on the wire. Pass an ExcerptSettings to control "
-            "per-result size (the API has no flag to disable excerpts in v1)."
+            "Per-result excerpt-size settings. The GA Extract API always "
+            "returns excerpts; pass `ExcerptSettings(max_chars_per_result=…)` "
+            "to control their size, or leave None for the API default."
         ),
     )
     full_content: Union[bool, FullContentSettings] = Field(
@@ -292,7 +276,7 @@ class ParallelExtractTool(BaseTool):
         urls: list[str],
         search_objective: Optional[str],
         search_queries: Optional[list[str]],
-        excerpts: Union[bool, ExcerptSettings, dict[str, Any], None],
+        excerpts: Optional[ExcerptSettings],
         full_content: Union[bool, FullContentSettings, dict[str, Any]],
         fetch_policy: Optional[FetchPolicy],
         max_chars_total: Optional[int],
@@ -358,7 +342,7 @@ class ParallelExtractTool(BaseTool):
         urls: list[str],
         search_objective: Optional[str] = None,
         search_queries: Optional[list[str]] = None,
-        excerpts: Union[bool, ExcerptSettings] = True,
+        excerpts: Optional[ExcerptSettings] = None,
         full_content: Union[bool, FullContentSettings] = False,
         max_chars_total: Optional[int] = None,
         fetch_policy: Optional[FetchPolicy] = None,
@@ -396,8 +380,20 @@ class ParallelExtractTool(BaseTool):
             msg = f"Error calling Parallel Extract API: {e!s}"
             raise ValueError(msg) from e
 
-        formatted = self._format_response(response_obj.model_dump())
+        envelope = response_obj.model_dump()
+        formatted = self._format_response(envelope)
         if run_manager:
+            for warning in envelope.get("warnings") or []:
+                warning_msg = (
+                    warning.get("message")
+                    if isinstance(warning, dict)
+                    else str(warning)
+                )
+                if warning_msg:
+                    run_manager.on_text(
+                        f"[warning] {warning_msg}\n",
+                        color="yellow",
+                    )
             run_manager.on_text(
                 self._completion_text(formatted, async_=False),
                 color="green",
@@ -409,7 +405,7 @@ class ParallelExtractTool(BaseTool):
         urls: list[str],
         search_objective: Optional[str] = None,
         search_queries: Optional[list[str]] = None,
-        excerpts: Union[bool, ExcerptSettings] = True,
+        excerpts: Optional[ExcerptSettings] = None,
         full_content: Union[bool, FullContentSettings] = False,
         max_chars_total: Optional[int] = None,
         fetch_policy: Optional[FetchPolicy] = None,
@@ -453,8 +449,20 @@ class ParallelExtractTool(BaseTool):
             msg = f"Error calling Parallel Extract API: {e!s}"
             raise ValueError(msg) from e
 
-        formatted = self._format_response(response_obj.model_dump())
+        envelope = response_obj.model_dump()
+        formatted = self._format_response(envelope)
         if run_manager:
+            for warning in envelope.get("warnings") or []:
+                warning_msg = (
+                    warning.get("message")
+                    if isinstance(warning, dict)
+                    else str(warning)
+                )
+                if warning_msg:
+                    await run_manager.on_text(
+                        f"[warning] {warning_msg}\n",
+                        color="yellow",
+                    )
             await run_manager.on_text(
                 self._completion_text(formatted, async_=True),
                 color="green",

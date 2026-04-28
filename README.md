@@ -1,17 +1,24 @@
 # LangChain Parallel Web Integration
 
-This package provides LangChain integrations for [Parallel](https://docs.parallel.ai/), enabling real-time web research and AI capabilities through an OpenAI-compatible interface.
+This package provides LangChain integrations for [Parallel](https://docs.parallel.ai/), covering Parallel's full developer-facing API surface.
 
 ## Features
 
-- **Chat Models**: `ChatParallel` (formerly `ChatParallelWeb`) — real-time web research chat completions, with citations and structured output on the research models.
-- **Search Tool**: `ParallelSearchTool` (formerly `ParallelWebSearchTool`) — direct access to Parallel's GA `/v1/search` endpoint.
-- **Extract Tool**: `ParallelExtractTool` — clean content extraction from web pages via `/v1/extract`.
-- **Streaming Support**: Real-time response streaming on chat.
-- **Async/Await**: Full asynchronous operation support.
-- **LangChain Integration**: Pydantic input schemas, `bind`-able tools, `with_structured_output()`, `lc_serializable`.
+| Surface | Class | Backed by |
+|---|---|---|
+| Chat completions with citations + structured output | [`ChatParallel`](#chat-models) | `/chat/completions` (lite/base/core) |
+| Web search → Documents (RAG) | [`ParallelSearchRetriever`](#retriever-rag) | `/v1/search` |
+| Web search tool (agents) | [`ParallelSearchTool`](#search-api) | `/v1/search` |
+| Web content extraction | [`ParallelExtractTool`](#extract-api) | `/v1/extract` |
+| Single Task Run + citations | [`ParallelTaskRunTool`](#task-api) | `/v1/tasks/runs` |
+| Deep-research Runnable | [`ParallelDeepResearch`](#task-api) | `/v1/tasks/runs` |
+| Bulk task batching | [`ParallelTaskGroup`](#task-api) | `/v1beta/tasks/groups` |
+| Structured-batch enrichment | [`ParallelEnrichment`](#task-api) | `/v1beta/tasks/groups` + TaskSpec |
+| Entity discovery | [`ParallelFindAllTool`](#findall-api) | `/v1beta/findall` |
+| Scheduled web monitors | [`ParallelMonitor`](#monitor-api-alpha) | `/v1alpha/monitors` |
+| Webhook signature verification | [`verify_webhook()`](#webhook-signature-verification) | HMAC-SHA256 |
 
-> Note: the older names (`ChatParallelWeb`, `ParallelWebSearchTool`) continue to work as aliases.
+> Old names (`ChatParallelWeb`, `ParallelWebSearchTool`) continue to work as aliases for `ChatParallel` and `ParallelSearchTool`.
 
 ## Installation
 
@@ -402,6 +409,233 @@ async def extract_async():
 
 # Run async extraction
 result = asyncio.run(extract_async())
+```
+
+## Retriever (RAG)
+
+`ParallelSearchRetriever` is a `BaseRetriever` that returns Parallel Search results as `Document`s. Drops in to any LangChain RAG pipeline.
+
+```python
+from langchain_parallel import ParallelSearchRetriever, SourcePolicy
+
+retriever = ParallelSearchRetriever(
+    max_results=5,
+    mode="advanced",
+    source_policy=SourcePolicy(include_domains=["nature.com", "arxiv.org"]),
+    objective="Focus on peer-reviewed material",  # forwarded on every call
+)
+
+docs = retriever.invoke("recent advances in protein folding")
+for doc in docs:
+    print(doc.metadata["title"], "-", doc.metadata["url"])
+    print(doc.page_content[:200])
+```
+
+`Document.metadata` carries `url`, `title`, `publish_date`, `search_id`, the original `excerpts` list, and the `query` that produced the document.
+
+## Task API
+
+The Task API exposes Parallel's research processors (`lite`, `base`, `core`, `core2x`, `pro`, `ultra`, `ultra2x/4x/8x`, plus matching `-fast` variants) and the `basis` citation graph. Four surfaces:
+
+| | Single input | List of inputs |
+|---|---|---|
+| **Untyped** | `ParallelTaskRunTool` (`BaseTool` for agents, defaults to `lite-fast`) | `ParallelTaskGroup` (low-level batch primitive, defaults to `lite-fast`) |
+| **Typed (TaskSpec)** | `ParallelDeepResearch` (`Runnable`, defaults to `pro-fast`) | `ParallelEnrichment` (`Runnable`, defaults to `core-fast`) |
+
+`ParallelTaskRunTool` is the only surface designed for an LLM to call mid-conversation. The other three are application-side: `TaskGroup` is the manual primitive, and `DeepResearch` / `Enrichment` are opinionated `Runnable`s for the two most common patterns.
+
+> All four default to a **`-fast`** processor variant. The `-fast` family is 2-5x faster than the corresponding non-fast tier at similar accuracy and is the right pick for agent-loop / interactive workflows. Strip the suffix (`processor="pro"`, `processor="ultra"`, etc.) when latency is less of a concern than maximum quality.
+
+### Single Task with citations
+
+```python
+from langchain_parallel import ParallelTaskRunTool
+
+tool = ParallelTaskRunTool()  # defaults to processor="lite-fast"
+result = tool.invoke({"input": "Who founded SpaceX, in one sentence?"})
+print(result["output"]["content"])
+print(result["output"]["basis"])  # per-field citations + reasoning + confidence
+print(result["run"]["run_id"])
+```
+
+### Deep research (Runnable)
+
+```python
+from langchain_parallel import ParallelDeepResearch
+
+# Defaults to processor="pro-fast" (the -fast variant of pro,
+# Exploratory web research, 2-5x faster than "pro" at similar accuracy).
+# For the most thorough report, pass processor="ultra" (5-25 min).
+research = ParallelDeepResearch()
+result = research.invoke("Latest developments in renewable energy storage")
+print(result["output"]["content"])
+for fact in result["output"].get("basis", []):
+    print(fact["field"], "->", fact["citations"])
+```
+
+### Structured-batch enrichment
+
+```python
+from pydantic import BaseModel, Field
+from langchain_parallel import ParallelEnrichment
+
+class CompanyInput(BaseModel):
+    company: str = Field(description="Company name to enrich")
+
+class CompanyOutput(BaseModel):
+    headquarters: str
+    founding_year: int
+
+enricher = ParallelEnrichment(
+    input_schema=CompanyInput,
+    output_schema=CompanyOutput,
+    # Defaults to processor="core-fast"; pass "core" or "pro" for higher
+    # accuracy when latency is less of a concern.
+)
+
+results = enricher.invoke([
+    CompanyInput(company="Anthropic"),
+    {"company": "OpenAI"},
+])
+for r in results:
+    print(r["output"]["content"])
+# {'headquarters': 'San Francisco, California, USA', 'founding_year': 2021}
+# {'headquarters': 'San Francisco, USA', 'founding_year': 2015}
+```
+
+### Structured output (pydantic)
+
+```python
+from pydantic import BaseModel, Field
+from langchain_parallel import ParallelTaskRunTool
+
+class CompanyFacts(BaseModel):
+    name: str
+    founded: int = Field(description="Year the company was founded")
+    headquarters: str
+
+tool = ParallelTaskRunTool(
+    processor="base",
+    task_output_schema=CompanyFacts,
+)
+result = tool.invoke({"input": "Tell me about Anthropic"})
+print(result["parsed"])  # CompanyFacts instance, fields populated
+```
+
+### `parse_basis()` — citations + low-confidence fields, in one call
+
+Every Task-surface result carries a `basis` (per-field citations + reasoning + confidence). `parse_basis()` walks it for you and returns the three things consumers actually want:
+
+```python
+from langchain_parallel import ParallelDeepResearch, parse_basis
+
+result = ParallelDeepResearch().invoke("Founder of SpaceX, in one sentence?")
+parsed = parse_basis(result)
+# parsed["citations_by_field"] -> {field_name: [citation, ...]}
+# parsed["low_confidence_fields"] -> ["year", ...]  # confidence == "low"
+# parsed["interaction_id"] -> str | None  # for multi-turn chaining
+```
+
+### Batch (Task Group)
+
+```python
+from langchain_parallel import ParallelTaskGroup
+
+group = ParallelTaskGroup()  # defaults to processor="lite-fast"
+results = group.run([
+    "Founder of Anthropic?",
+    "Founder of OpenAI?",
+    "Founder of Google DeepMind?",
+])
+for r in results:
+    print(r["output"])
+```
+
+### BYOMCP (bring-your-own MCP servers)
+
+```python
+from langchain_parallel import McpServer, ParallelTaskRunTool
+
+tool = ParallelTaskRunTool(
+    processor="base",
+    mcp_servers=[
+        McpServer(
+            name="my_internal_data",
+            url="https://mcp.example.com/internal",
+            headers={"Authorization": "Bearer ..."},
+        ),
+    ],
+)
+```
+
+## FindAll API
+
+Discover entities from the web that satisfy a natural-language objective plus boolean match conditions.
+
+```python
+from langchain_parallel import (
+    ParallelFindAllTool,
+    FindAllMatchCondition,
+)
+
+tool = ParallelFindAllTool(generator="base")
+result = tool.invoke({
+    "objective": "AI agent startups founded after 2023",
+    "entity_type": "company",
+    "match_conditions": [
+        FindAllMatchCondition(
+            name="founded_after_2023",
+            description="Was this company founded after January 1 2023?",
+        ),
+        FindAllMatchCondition(
+            name="builds_ai_agents",
+            description="Does this company build AI agents as a core product?",
+        ),
+    ],
+    "match_limit": 25,
+})
+for candidate in result["candidates"]:
+    print(candidate["name"], "-", candidate["url"])
+```
+
+Generators: `preview` (small free sample), `base`, `core`, `pro` (highest quality, longest-running).
+
+## Monitor API (alpha)
+
+Schedule recurring web queries that emit webhook events on change. The Monitor API is **alpha**; shapes may change without notice. The current SDK doesn't expose this surface, so `ParallelMonitor` talks to `/v1alpha/monitors` directly.
+
+```python
+from langchain_parallel import ParallelMonitor, MonitorWebhook
+
+monitors = ParallelMonitor()
+
+m = monitors.create(
+    query="Track new SEC filings related to Anthropic",
+    frequency="1h",
+    webhook=MonitorWebhook(
+        url="https://example.com/parallel-webhook",
+        secret="...",  # used to HMAC-sign payloads
+    ),
+)
+
+events = monitors.list_events(m["monitor_id"])
+print(len(events["event_groups"]))
+```
+
+## Webhook signature verification
+
+Validates HMAC-SHA256 signatures on incoming Task Run / FindAll / Monitor webhooks.
+
+```python
+from langchain_parallel import verify_webhook
+
+@app.post("/parallel-webhook")
+async def webhook(request):
+    body = await request.body()
+    signature = request.headers["parallel-signature"]
+    if not verify_webhook(body, signature, secret="..."):
+        return Response(status_code=401)
+    # ... process the event
 ```
 
 ## Error Handling

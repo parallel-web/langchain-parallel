@@ -1,0 +1,970 @@
+"""LangChain integration for Parallel's Task API.
+
+Four primary surfaces:
+
+- :class:`ParallelTaskRunTool` — agent-callable tool that runs a single
+  Parallel Task synchronously (via ``client.task_run.execute``) and
+  returns the structured result with citations.
+- :class:`ParallelDeepResearch` — high-level :class:`~langchain_core.runnables.Runnable`
+  wrapper for deep-research tasks. Defaults to the ``core`` processor and
+  always returns the full ``basis`` (citations + reasoning + confidence).
+- :class:`ParallelTaskGroup` — batch executor backed by the Task Group
+  API. The general building block for fan-out/fan-in workloads.
+- :class:`ParallelEnrichment` — the structured-batch counterpart to
+  :class:`ParallelDeepResearch`. A typed Runnable that enriches a list
+  of records against a pydantic input/output schema using the Task
+  Group API under the hood.
+
+Helpers: :func:`build_task_spec` constructs a Task Spec dict from
+pydantic classes; :func:`verify_webhook` validates HMAC signatures on
+incoming Parallel webhooks.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+from typing import Any, Literal, Optional, Union
+
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForToolRun,
+    CallbackManagerForToolRun,
+)
+from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool
+from parallel import AsyncParallel, Parallel
+from pydantic import BaseModel, Field, SecretStr, model_validator
+
+from ._client import get_api_key, get_async_parallel_client, get_parallel_client
+
+_TIER_PROCESSORS = (
+    "lite",
+    "base",
+    "core",
+    "core2x",
+    "pro",
+    "ultra",
+    "ultra2x",
+    "ultra4x",
+    "ultra8x",
+)
+ALL_PROCESSORS = tuple(
+    name + suffix for name in _TIER_PROCESSORS for suffix in ("", "-fast")
+)
+ProcessorLiteral = Literal[
+    "lite",
+    "base",
+    "core",
+    "core2x",
+    "pro",
+    "ultra",
+    "ultra2x",
+    "ultra4x",
+    "ultra8x",
+    "lite-fast",
+    "base-fast",
+    "core-fast",
+    "core2x-fast",
+    "pro-fast",
+    "ultra-fast",
+    "ultra2x-fast",
+    "ultra4x-fast",
+    "ultra8x-fast",
+]
+
+_MCP_BETA_HEADER = "mcp-server-2025-07-17"
+
+
+_SDK_SCHEMA_TYPES = {"json", "text", "auto"}
+
+
+def _to_schema_param(
+    value: Union[type[BaseModel], dict[str, Any], str, None],
+) -> Optional[dict[str, Any]]:
+    """Normalize a schema value into the SDK's ``{type, ...}`` envelope.
+
+    Accepts:
+
+    - a pydantic ``BaseModel`` subclass → wrapped as a ``json`` envelope
+      whose ``json_schema`` is the class's ``model_json_schema()``
+    - a plain string → wrapped as ``{"type": "text", "description": value}``
+    - a dict already in SDK envelope shape (``type`` ∈ ``{json, text, auto}``)
+      → returned as-is
+    - any other dict (raw JSON schema) → wrapped as a ``json`` envelope
+    - ``None`` → ``None``
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return {"type": "text", "description": value}
+    if isinstance(value, type) and issubclass(value, BaseModel):
+        return {"type": "json", "json_schema": value.model_json_schema()}
+    if isinstance(value, dict):
+        # An "envelope" dict carries the SDK's discriminator type.
+        if value.get("type") in _SDK_SCHEMA_TYPES:
+            return dict(value)
+        # Otherwise treat the dict as a raw JSON schema and wrap it.
+        return {"type": "json", "json_schema": dict(value)}
+    msg = (
+        f"Unsupported schema type {type(value).__name__}: pass a pydantic "
+        f"BaseModel subclass, a JSON-schema dict, a str, or a fully-formed "
+        f"`{{type, ...}}` dict."
+    )
+    raise TypeError(msg)
+
+
+def build_task_spec(
+    *,
+    output_schema: Union[type[BaseModel], dict[str, Any], str],
+    input_schema: Union[type[BaseModel], dict[str, Any], str, None] = None,
+) -> dict[str, Any]:
+    """Build a ``TaskSpecParam`` dict from pydantic classes / schemas / text.
+
+    Mirrors the helper used in https://docs.parallel.ai/task-api/examples/task-enrichment.
+    """
+    spec: dict[str, Any] = {"output_schema": _to_schema_param(output_schema)}
+    if input_schema is not None:
+        spec["input_schema"] = _to_schema_param(input_schema)
+    return spec
+
+
+class McpServer(BaseModel):
+    """One BYOMCP server description for a Task Run.
+
+    Mirrors :class:`parallel.types.McpServerParam` so callers don't have to
+    import from the SDK directly.
+    """
+
+    name: str = Field(description="Unique name for the MCP server.")
+    url: str = Field(description="HTTPS URL of a Streamable HTTP MCP endpoint.")
+    headers: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Headers (e.g. Authorization) sent on every MCP call.",
+    )
+    allowed_tools: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "If set, restrict the run to tools whose names appear in this list."
+        ),
+    )
+
+    def to_sdk(self) -> dict[str, Any]:
+        """Render to the SDK kwargs shape."""
+        out: dict[str, Any] = {"type": "url", "name": self.name, "url": self.url}
+        if self.headers is not None:
+            out["headers"] = self.headers
+        if self.allowed_tools is not None:
+            out["allowed_tools"] = list(self.allowed_tools)
+        return out
+
+
+_DEFAULT_WEBHOOK_TOLERANCE_SECONDS = 5 * 60
+
+
+def verify_webhook(
+    payload: bytes,
+    *,
+    webhook_id: str,
+    webhook_timestamp: str,
+    webhook_signature: str,
+    secret: str,
+    tolerance_seconds: int = _DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+) -> bool:
+    """Verify a Parallel webhook signature (Standard Webhooks scheme).
+
+    Parallel signs webhook payloads using HMAC-SHA256 over
+    ``"<webhook-id>.<webhook-timestamp>.<body>"``, base64-encoded
+    with padding. The signature is delivered as the ``webhook-signature``
+    header (possibly with multiple space-delimited ``v1,<sig>`` entries).
+    See https://docs.parallel.ai/resources/webhook-setup.
+
+    The verification flow is:
+
+    1. Reject if the timestamp drifts more than ``tolerance_seconds`` from now
+       (replay protection).
+    2. Compute the expected signature.
+    3. Compare against every ``v1,<sig>`` entry in the header.
+
+    Args:
+        payload: Raw request body bytes (do not decode-then-encode — must be
+            byte-identical to what Parallel signed).
+        webhook_id: Value of the ``webhook-id`` header.
+        webhook_timestamp: Value of the ``webhook-timestamp`` header (Unix
+            seconds as a string).
+        webhook_signature: Value of the ``webhook-signature`` header.
+        secret: Your webhook signing secret (from the Parallel dashboard).
+        tolerance_seconds: Reject signatures whose timestamp differs from
+            ``time.time()`` by more than this many seconds. Defaults to 5
+            minutes (the Standard Webhooks recommendation).
+
+    Returns:
+        True if the signature is valid and within tolerance; False otherwise.
+    """
+    import base64
+    import time
+
+    try:
+        ts = int(webhook_timestamp)
+    except (TypeError, ValueError):
+        return False
+    if abs(time.time() - ts) > tolerance_seconds:
+        return False
+
+    signed = f"{webhook_id}.{webhook_timestamp}.{payload.decode('utf-8')}"
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        signed.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    expected = base64.b64encode(digest).decode("ascii")
+
+    # The header may carry multiple signatures, space-delimited, each prefixed
+    # with a version (e.g. "v1,<sig> v1,<sig>"). Match if any entry matches.
+    for entry in webhook_signature.split():
+        if "," not in entry:
+            continue
+        version, sig = entry.split(",", 1)
+        if version != "v1":
+            continue
+        if hmac.compare_digest(expected, sig):
+            return True
+    return False
+
+
+def _extract_basis(result: dict[str, Any]) -> list[Any]:
+    """Pull the basis list out of a Task result.
+
+    The basis can sit at the top level (`result["basis"]`) or nested under
+    `result["output"]["basis"]` depending on the surface and whether a
+    structured output schema was used.
+    """
+    direct = result.get("basis")
+    if isinstance(direct, list):
+        return direct
+    output = result.get("output")
+    if isinstance(output, dict):
+        nested = output.get("basis")
+        if isinstance(nested, list):
+            return nested
+    return []
+
+
+def parse_basis(result: dict[str, Any]) -> dict[str, Any]:
+    """Extract citations, low-confidence fields, and `interaction_id`.
+
+    Saves Task-API consumers the boilerplate of walking the result shape to
+    pull out per-field citations, find which fields the model wasn't sure
+    about, and grab the `interaction_id` for multi-turn chaining.
+
+    Works on results from :class:`ParallelTaskRunTool`,
+    :class:`ParallelDeepResearch`, and individual entries from
+    :class:`ParallelTaskGroup` / :class:`ParallelEnrichment` batches.
+
+    Args:
+        result: A Task result dict — the value returned by ``.invoke()`` /
+            ``.run()`` on a Task surface, or one entry from a batch surface.
+
+    Returns:
+        Dict with three keys:
+
+        - ``citations_by_field``: ``{field_name: [citation_dict, ...]}``
+          keyed by the output-schema field. Empty when there's no basis.
+        - ``low_confidence_fields``: list of field names whose
+          ``confidence`` is ``"low"`` (case-insensitive). Empty when all
+          fields are medium/high or unset.
+        - ``interaction_id``: the run's `interaction_id` for chaining
+          (or ``None`` if the API didn't return one).
+
+    Example:
+        ```python
+        from langchain_parallel import ParallelDeepResearch, parse_basis
+
+        result = ParallelDeepResearch().invoke("Founder of SpaceX?")
+        parsed = parse_basis(result)
+        for field in parsed["low_confidence_fields"]:
+            print(f"low confidence: {field}")
+        for field, cites in parsed["citations_by_field"].items():
+            print(f"{field}: {len(cites)} citation(s)")
+        ```
+    """
+    basis = _extract_basis(result)
+
+    citations_by_field: dict[str, list[dict[str, Any]]] = {}
+    low_confidence: list[str] = []
+    for entry in basis:
+        if not isinstance(entry, dict):
+            continue
+        field = entry.get("field")
+        if not isinstance(field, str) or not field:
+            continue
+        citations_by_field[field] = list(entry.get("citations") or [])
+        confidence = entry.get("confidence")
+        if isinstance(confidence, str) and confidence.lower() == "low":
+            low_confidence.append(field)
+
+    interaction_id = result.get("interaction_id")
+    if not interaction_id:
+        run = result.get("run")
+        if isinstance(run, dict):
+            interaction_id = run.get("interaction_id") or None
+
+    return {
+        "citations_by_field": citations_by_field,
+        "low_confidence_fields": low_confidence,
+        "interaction_id": interaction_id,
+    }
+
+
+class _TaskClientMixin(BaseModel):
+    """Shared API-key + client plumbing for the Task surfaces."""
+
+    api_key: Optional[SecretStr] = Field(default=None)
+    base_url: str = Field(default="https://api.parallel.ai")
+
+    _client: Optional[Parallel] = None
+    _async_client: Optional[AsyncParallel] = None
+
+    @model_validator(mode="after")
+    def _initialize_clients(self) -> _TaskClientMixin:
+        api_key_str = get_api_key(
+            self.api_key.get_secret_value() if self.api_key else None,
+        )
+        self._client = get_parallel_client(api_key_str, self.base_url)
+        self._async_client = get_async_parallel_client(api_key_str, self.base_url)
+        return self
+
+
+class ParallelTaskRunInput(BaseModel):
+    """Input schema for :class:`ParallelTaskRunTool`."""
+
+    input: Union[str, dict[str, Any]] = Field(
+        description=(
+            "The task input. Either a freeform string (matches a default text "
+            "input schema) or a dict matching the tool's configured "
+            "`input_schema` if a TaskSpec was set."
+        ),
+    )
+    metadata: Optional[dict[str, Union[str, float, bool]]] = Field(
+        default=None,
+        description="Free-form metadata persisted on the run.",
+    )
+    previous_interaction_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Chain context from a prior run. Pass the `interaction_id` from "
+            "an earlier `ParallelTaskRunTool` / `ParallelDeepResearch` result "
+            "to continue a multi-turn research thread. See "
+            "https://docs.parallel.ai/task-api/guides/interactions."
+        ),
+    )
+
+
+class ParallelTaskRunTool(BaseTool):
+    """Run a single Parallel Task synchronously and return the structured result.
+
+    This is the agent-friendly path: an LLM calls the tool with `input`, the
+    tool blocks until the Parallel Task Run completes, and returns a dict
+    containing the output, citations (`basis`), and run metadata.
+
+    For long-running deep-research tasks, prefer :class:`ParallelDeepResearch`,
+    which is a :class:`~langchain_core.runnables.Runnable` and returns the same
+    result shape.
+
+    Setup:
+        ```bash
+        export PARALLEL_API_KEY="your-api-key"
+        ```
+
+    Key init args:
+        processor: Literal[...]
+            Which Parallel processor to run. Defaults to ``"lite-fast"`` —
+            the ``-fast`` variants are 2-5x faster than their non-fast
+            counterparts at similar accuracy. Use ``"core"`` / ``"pro"``
+            for deep research and ``"ultra"`` for the highest-quality
+            long-running tasks. Add ``-fast`` to any tier for
+            agent-loop-friendly latency.
+        output_schema: Optional[type[BaseModel] | dict | str]
+            If a pydantic class, the SDK parses the response into an instance
+            of the class. If a dict, it's used as the JSON schema. If a
+            string, it's used as the natural-language output description
+            (text output mode).
+        mcp_servers: Optional[list[McpServer]]
+            BYOMCP servers exposed to the run.
+        api_key: Optional[SecretStr]
+
+    Invocation:
+        ```python
+        from langchain_parallel import ParallelTaskRunTool
+
+        tool = ParallelTaskRunTool()  # processor="lite-fast"
+        result = tool.invoke({"input": "Who founded SpaceX, in one sentence?"})
+        # The structured output is at result["output"]["content"]; per-field
+        # citations are at result["output"]["basis"]; the run id is at
+        # result["run"]["run_id"].
+        print(result["output"]["content"])
+        print(result["output"]["basis"])
+        ```
+    """
+
+    name: str = "parallel_task_run"
+    description: str = (
+        "Run a single Parallel Task synchronously. Inputs are either freeform "
+        "text or a dict matching the configured input_schema. Returns the "
+        "structured output, per-field citations (basis), and run id."
+    )
+    args_schema: type[BaseModel] = ParallelTaskRunInput
+
+    api_key: Optional[SecretStr] = Field(default=None)
+    base_url: str = Field(default="https://api.parallel.ai")
+
+    processor: ProcessorLiteral = Field(default="lite-fast")
+    """Which processor to run.
+
+    Defaults to ``"lite-fast"``. The ``-fast`` variants are 2-5x faster
+    than their non-fast counterparts at similar accuracy and are the
+    right pick for agent-loop / interactive workflows. Strip the suffix
+    (``"lite"``, ``"core"``, etc.) when latency is less of a concern
+    than maximum quality.
+    """
+
+    task_output_schema: Optional[Union[type[BaseModel], dict[str, Any], str]] = None
+    """Output spec: pydantic class, JSON-schema dict, or text description.
+
+    (Named `task_output_schema` to avoid shadowing `BaseTool.output_schema`.)
+    """
+
+    task_spec: Optional[dict[str, Any]] = None
+    """Optional full TaskSpec dict ``{input_schema, output_schema}``.
+
+    When set, takes precedence over ``task_output_schema`` and unlocks
+    structured ``input_schema`` validation. Required for the Task Group
+    API's structured-batch pattern. See
+    https://docs.parallel.ai/task-api/guides/specify-a-task.
+    """
+
+    mcp_servers: Optional[list[McpServer]] = None
+    """BYOMCP servers to make available to the run."""
+
+    _client: Optional[Parallel] = None
+    _async_client: Optional[AsyncParallel] = None
+
+    @model_validator(mode="after")
+    def _initialize_clients(self) -> ParallelTaskRunTool:
+        api_key_str = get_api_key(
+            self.api_key.get_secret_value() if self.api_key else None,
+        )
+        self._client = get_parallel_client(api_key_str, self.base_url)
+        self._async_client = get_async_parallel_client(api_key_str, self.base_url)
+        return self
+
+    def _build_execute_kwargs(
+        self,
+        task_input: Union[str, dict[str, Any]],
+        metadata: Optional[dict[str, Union[str, float, bool]]],
+        timeout: Optional[float],
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "input": task_input,
+            "processor": self.processor,
+        }
+        if self.task_output_schema is not None:
+            # The SDK accepts the pydantic class directly via the `output=` kwarg
+            # and parses for you; for dicts/strings it treats them as schemas.
+            kwargs["output"] = self.task_output_schema
+        if metadata is not None:
+            kwargs["metadata"] = metadata
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return kwargs
+
+    def _build_create_kwargs(
+        self,
+        task_input: Union[str, dict[str, Any]],
+        metadata: Optional[dict[str, Union[str, float, bool]]],
+        previous_interaction_id: Optional[str],
+        timeout: Optional[float],
+    ) -> dict[str, Any]:
+        """Build kwargs for ``client.beta.task_run.create`` (the create+poll path).
+
+        Used when the user passes ``mcp_servers``, ``task_spec``, or any
+        other field that ``execute()`` doesn't accept.
+        """
+        kwargs: dict[str, Any] = {
+            "input": task_input,
+            "processor": self.processor,
+        }
+        if self.task_spec is not None:
+            kwargs["task_spec"] = self.task_spec
+        if metadata is not None:
+            kwargs["metadata"] = metadata
+        if previous_interaction_id is not None:
+            kwargs["previous_interaction_id"] = previous_interaction_id
+        if self.mcp_servers:
+            kwargs["mcp_servers"] = [m.to_sdk() for m in self.mcp_servers]
+            kwargs["betas"] = [_MCP_BETA_HEADER]
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return kwargs
+
+    def _format_result(self, result: Any) -> dict[str, Any]:
+        """Convert the SDK's TaskRunResult / ParsedTaskRunResult to a dict.
+
+        Surfaces the run id, output, basis (citations + reasoning + confidence),
+        any usage info the API returned, and the top-level ``interaction_id``
+        for multi-turn context chaining.
+        """
+        payload = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+        # ParsedTaskRunResult exposes `.parsed` as the typed pydantic instance;
+        # if our caller asked for a pydantic schema, surface the parsed object.
+        if hasattr(result, "parsed") and result.parsed is not None:
+            parsed = result.parsed
+            payload["parsed"] = (
+                parsed.model_dump() if hasattr(parsed, "model_dump") else parsed
+            )
+        # Promote interaction_id from the nested `run` dict so callers can
+        # chain multi-turn research without diving into the structure.
+        run_block = payload.get("run") or {}
+        if isinstance(run_block, dict) and run_block.get("interaction_id"):
+            payload["interaction_id"] = run_block["interaction_id"]
+        return payload
+
+    def _needs_create_path(self) -> bool:
+        """`execute()` doesn't accept mcp_servers or task_spec; route via create."""
+        return bool(self.mcp_servers) or self.task_spec is not None
+
+    def _run(
+        self,
+        input: Union[str, dict[str, Any]],  # noqa: A002 -- SDK uses `input` too
+        metadata: Optional[dict[str, Union[str, float, bool]]] = None,
+        previous_interaction_id: Optional[str] = None,
+        *,
+        timeout: Optional[float] = None,
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> dict[str, Any]:
+        if self._client is None:
+            msg = "Parallel client not initialized."
+            raise RuntimeError(msg)
+        if run_manager:
+            run_manager.on_text(
+                f"Starting Parallel task ({self.processor})...\n",
+                color="blue",
+            )
+
+        try:
+            if self._needs_create_path():
+                run = self._client.beta.task_run.create(
+                    **self._build_create_kwargs(
+                        input,
+                        metadata,
+                        previous_interaction_id,
+                        timeout,
+                    ),
+                )
+                result = self._client.task_run.result(run.run_id, timeout=timeout)
+            else:
+                kwargs = self._build_execute_kwargs(input, metadata, timeout)
+                if previous_interaction_id is not None:
+                    # `execute()` doesn't take previous_interaction_id; route via
+                    # create() so multi-turn chaining works on the simple path too.
+                    create_kwargs = self._build_create_kwargs(
+                        input,
+                        metadata,
+                        previous_interaction_id,
+                        timeout,
+                    )
+                    if self.task_output_schema is not None:
+                        create_kwargs["task_spec"] = create_kwargs.get(
+                            "task_spec",
+                        ) or {"output_schema": self.task_output_schema}
+                    run = self._client.beta.task_run.create(**create_kwargs)
+                    result = self._client.task_run.result(run.run_id, timeout=timeout)
+                else:
+                    result = self._client.task_run.execute(**kwargs)
+        except Exception as e:
+            msg = f"Error calling Parallel Task API: {e!s}"
+            raise ValueError(msg) from e
+
+        if run_manager:
+            run_manager.on_text("Task completed\n", color="green")
+        return self._format_result(result)
+
+    async def _arun(
+        self,
+        input: Union[str, dict[str, Any]],  # noqa: A002
+        metadata: Optional[dict[str, Union[str, float, bool]]] = None,
+        previous_interaction_id: Optional[str] = None,
+        *,
+        timeout: Optional[float] = None,
+        run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
+    ) -> dict[str, Any]:
+        if self._async_client is None:
+            msg = "Async Parallel client not initialized."
+            raise RuntimeError(msg)
+        if run_manager:
+            await run_manager.on_text(
+                f"Starting Parallel task ({self.processor})...\n",
+                color="blue",
+            )
+
+        try:
+            if self._needs_create_path() or previous_interaction_id is not None:
+                create_kwargs = self._build_create_kwargs(
+                    input,
+                    metadata,
+                    previous_interaction_id,
+                    timeout,
+                )
+                if (
+                    not self._needs_create_path()
+                    and self.task_output_schema is not None
+                ):
+                    create_kwargs["task_spec"] = create_kwargs.get(
+                        "task_spec",
+                    ) or {"output_schema": self.task_output_schema}
+                run = await self._async_client.beta.task_run.create(**create_kwargs)
+                result = await self._async_client.task_run.result(
+                    run.run_id,
+                    timeout=timeout,
+                )
+            else:
+                result = await self._async_client.task_run.execute(
+                    **self._build_execute_kwargs(input, metadata, timeout),
+                )
+        except Exception as e:
+            msg = f"Error calling Parallel Task API: {e!s}"
+            raise ValueError(msg) from e
+
+        if run_manager:
+            await run_manager.on_text("Task completed\n", color="green")
+        return self._format_result(result)
+
+
+class ParallelDeepResearch(Runnable[Union[str, dict[str, Any]], dict[str, Any]]):
+    """High-level Runnable for Parallel deep-research tasks.
+
+    Defaults to the ``pro-fast`` processor -- the ``-fast`` variant of
+    ``pro`` ("Exploratory web research") at 2-5x the speed for similar
+    accuracy. Drop the ``-fast`` suffix (``processor="pro"``, 2-10 min)
+    or step up to ``processor="ultra"`` (5-25 min) for the most thorough
+    multi-source investigative reports. For shorter, enrichment-style
+    structured tasks, use :class:`ParallelEnrichment` or pass
+    ``processor="core-fast"`` here.
+
+    Always returns the full ``basis`` (citations + reasoning + confidence)
+    on the result; lower friction than wiring up
+    :class:`ParallelTaskRunTool` manually when all you want is "do deep
+    research on this question."
+
+    Example:
+        ```python
+        research = ParallelDeepResearch()  # processor="pro-fast"
+        result = research.invoke("Latest developments in renewable energy")
+        print(result["output"]["content"])
+        for fact in result["output"].get("basis", []):
+            print(fact["field"], "->", fact["citations"])
+
+        # For the most thorough report:
+        research = ParallelDeepResearch(processor="ultra")
+        ```
+    """
+
+    def __init__(
+        self,
+        *,
+        processor: ProcessorLiteral = "pro-fast",
+        output_schema: Optional[Union[type[BaseModel], dict[str, Any], str]] = None,
+        api_key: Optional[Union[str, SecretStr]] = None,
+        base_url: str = "https://api.parallel.ai",
+        mcp_servers: Optional[list[McpServer]] = None,
+    ) -> None:
+        self.processor = processor
+        self._output_schema = output_schema
+        self.mcp_servers = mcp_servers
+        self._tool = ParallelTaskRunTool(
+            processor=processor,
+            task_output_schema=output_schema,
+            api_key=(
+                api_key
+                if isinstance(api_key, SecretStr) or api_key is None
+                else SecretStr(api_key)
+            ),
+            base_url=base_url,
+            mcp_servers=mcp_servers,
+        )
+
+    def invoke(  # type: ignore[override]
+        self,
+        input: Union[str, dict[str, Any]],  # noqa: A002
+        config: Any = None,
+        *,
+        previous_interaction_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        tool_input: dict[str, Any] = {"input": input}
+        if previous_interaction_id is not None:
+            tool_input["previous_interaction_id"] = previous_interaction_id
+        return self._tool.invoke(tool_input, config=config, **kwargs)
+
+    async def ainvoke(  # type: ignore[override]
+        self,
+        input: Union[str, dict[str, Any]],  # noqa: A002
+        config: Any = None,
+        *,
+        previous_interaction_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        tool_input: dict[str, Any] = {"input": input}
+        if previous_interaction_id is not None:
+            tool_input["previous_interaction_id"] = previous_interaction_id
+        return await self._tool.ainvoke(tool_input, config=config, **kwargs)
+
+
+class ParallelTaskGroup(_TaskClientMixin):
+    """Batch task runner backed by the Task Group API.
+
+    Use when you have a list of inputs and want them all processed in
+    parallel. Returns a list of result dicts in the same order as the
+    input list.
+
+    Example:
+        ```python
+        group = ParallelTaskGroup()  # processor="lite-fast"
+        results = group.run(
+            inputs=[
+                "Founder of Anthropic?",
+                "Founder of OpenAI?",
+                "Founder of Google DeepMind?",
+            ]
+        )
+        for inp, out in zip(inputs, results):
+            print(inp, "->", out["output"])
+        ```
+    """
+
+    processor: ProcessorLiteral = Field(default="lite-fast")
+    """Default processor for runs added to this group.
+
+    Defaults to ``"lite-fast"``. Strip the ``-fast`` suffix
+    (``"lite"``, ``"core"``, etc.) when latency is less of a concern
+    than maximum quality.
+    """
+
+    task_spec: Optional[dict[str, Any]] = Field(default=None)
+    """Optional ``default_task_spec`` applied to every run in the group.
+
+    Use :func:`build_task_spec` to construct this from pydantic classes,
+    or pass a dict directly. When set, every input added to the group
+    must conform to ``task_spec["input_schema"]``.
+    """
+
+    metadata: Optional[dict[str, Union[str, float, bool]]] = Field(default=None)
+
+    def _kick_off_runs(
+        self,
+        inputs: list[Union[str, dict[str, Any]]],
+    ) -> list[str]:
+        """Create a group, add runs, and return the list of run_ids."""
+        if self._client is None:
+            msg = "Parallel client not initialized."
+            raise RuntimeError(msg)
+        group = self._client.beta.task_group.create(metadata=self.metadata)
+        run_inputs: list[Any] = [
+            {"input": inp, "processor": self.processor} for inp in inputs
+        ]
+        add_kwargs: dict[str, Any] = {
+            "inputs": run_inputs,
+            "refresh_status": True,
+        }
+        if self.task_spec is not None:
+            add_kwargs["default_task_spec"] = self.task_spec
+        response = self._client.beta.task_group.add_runs(
+            group.task_group_id,
+            **add_kwargs,
+        )
+        return list(response.run_ids or [])
+
+    async def _akick_off_runs(
+        self,
+        inputs: list[Union[str, dict[str, Any]]],
+    ) -> list[str]:
+        if self._async_client is None:
+            msg = "Async Parallel client not initialized."
+            raise RuntimeError(msg)
+        group = await self._async_client.beta.task_group.create(
+            metadata=self.metadata,
+        )
+        run_inputs: list[Any] = [
+            {"input": inp, "processor": self.processor} for inp in inputs
+        ]
+        add_kwargs: dict[str, Any] = {
+            "inputs": run_inputs,
+            "refresh_status": True,
+        }
+        if self.task_spec is not None:
+            add_kwargs["default_task_spec"] = self.task_spec
+        response = await self._async_client.beta.task_group.add_runs(
+            group.task_group_id,
+            **add_kwargs,
+        )
+        return list(response.run_ids or [])
+
+    def run(
+        self,
+        inputs: list[Union[str, dict[str, Any]]],
+        *,
+        timeout: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        """Submit a batch of inputs and block until all results are ready."""
+        if self._client is None:
+            msg = "Parallel client not initialized."
+            raise RuntimeError(msg)
+        try:
+            run_ids = self._kick_off_runs(inputs)
+            results: list[dict[str, Any]] = []
+            for run_id in run_ids:
+                result = self._client.task_run.result(run_id, timeout=timeout)
+                results.append(
+                    result.model_dump()
+                    if hasattr(result, "model_dump")
+                    else dict(result),
+                )
+            return results
+        except Exception as e:
+            msg = f"Error calling Parallel Task Group API: {e!s}"
+            raise ValueError(msg) from e
+
+    async def arun(
+        self,
+        inputs: list[Union[str, dict[str, Any]]],
+        *,
+        timeout: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        if self._async_client is None:
+            msg = "Async Parallel client not initialized."
+            raise RuntimeError(msg)
+        try:
+            run_ids = await self._akick_off_runs(inputs)
+            results: list[dict[str, Any]] = []
+            for run_id in run_ids:
+                result = await self._async_client.task_run.result(
+                    run_id,
+                    timeout=timeout,
+                )
+                results.append(
+                    result.model_dump()
+                    if hasattr(result, "model_dump")
+                    else dict(result),
+                )
+            return results
+        except Exception as e:
+            msg = f"Error calling Parallel Task Group API: {e!s}"
+            raise ValueError(msg) from e
+
+
+EnrichmentInput = Union[str, dict[str, Any], BaseModel]
+
+
+class ParallelEnrichment(
+    Runnable[list[EnrichmentInput], list[dict[str, Any]]],
+):
+    """High-level Runnable for the structured-batch enrichment pattern.
+
+    Wraps :class:`ParallelTaskGroup` with a ``default_task_spec`` so callers
+    can pass a list of records (pydantic instances or dicts) and get back a
+    list of enriched output dicts. Mirrors the canonical enrichment pattern
+    documented at
+    https://docs.parallel.ai/task-api/examples/task-enrichment.
+
+    Defaults to the ``core`` processor (the docs' recommendation for
+    enrichment workflows).
+
+    Example:
+        ```python
+        from pydantic import BaseModel, Field
+        from langchain_parallel import ParallelEnrichment
+
+        class CompanyInput(BaseModel):
+            company: str = Field(description="Company name to enrich")
+
+        class CompanyOutput(BaseModel):
+            headquarters: str
+            founding_year: int = Field(description="Year the company was founded")
+
+        enricher = ParallelEnrichment(
+            input_schema=CompanyInput,
+            output_schema=CompanyOutput,
+            # Defaults to processor="core-fast"; pass "core" or "pro" for
+            # higher accuracy when latency is less of a concern.
+        )
+
+        results = enricher.invoke([
+            {"company": "Anthropic"},
+            {"company": "OpenAI"},
+            {"company": "Google DeepMind"},
+        ])
+
+        for inp, out in zip(["Anthropic", "OpenAI", "Google DeepMind"], results):
+            content = out["output"]["content"]
+            print(inp, "->", content)
+        ```
+    """
+
+    def __init__(
+        self,
+        *,
+        output_schema: Union[type[BaseModel], dict[str, Any], str],
+        input_schema: Union[type[BaseModel], dict[str, Any], str, None] = None,
+        processor: ProcessorLiteral = "core-fast",
+        api_key: Optional[Union[str, SecretStr]] = None,
+        base_url: str = "https://api.parallel.ai",
+        metadata: Optional[dict[str, Union[str, float, bool]]] = None,
+    ) -> None:
+        # Note: avoid attribute names `input_schema` / `output_schema` because
+        # `Runnable` exposes them as read-only properties.
+        self.processor = processor
+        self._input_schema = input_schema
+        self._output_schema = output_schema
+        self._group = ParallelTaskGroup(
+            processor=processor,
+            api_key=(
+                api_key
+                if isinstance(api_key, SecretStr) or api_key is None
+                else SecretStr(api_key)
+            ),
+            base_url=base_url,
+            task_spec=build_task_spec(
+                output_schema=output_schema,
+                input_schema=input_schema,
+            ),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _coerce_inputs(
+        inputs: list[EnrichmentInput],
+    ) -> list[Union[str, dict[str, Any]]]:
+        coerced: list[Union[str, dict[str, Any]]] = []
+        for item in inputs:
+            if isinstance(item, BaseModel):
+                coerced.append(item.model_dump(exclude_none=True))
+            else:
+                coerced.append(item)
+        return coerced
+
+    def invoke(  # type: ignore[override]
+        self,
+        input: list[EnrichmentInput],  # noqa: A002
+        config: Any = None,
+        *,
+        timeout: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        return self._group.run(self._coerce_inputs(input), timeout=timeout)
+
+    async def ainvoke(  # type: ignore[override]
+        self,
+        input: list[EnrichmentInput],  # noqa: A002
+        config: Any = None,
+        *,
+        timeout: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        return await self._group.arun(self._coerce_inputs(input), timeout=timeout)

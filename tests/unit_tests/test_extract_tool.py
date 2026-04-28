@@ -253,12 +253,12 @@ class TestParallelExtractTool:
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")
-    def test_excerpts_bool_true_is_no_op(
+    def test_excerpts_default_is_no_op(
         self,
         mock_async_factory: Mock,
         mock_sync_factory: Mock,
     ) -> None:
-        """Backward compat: excerpts=True (the default) adds no excerpt_settings."""
+        """Default `excerpts=None` adds no excerpt_settings."""
         sync_client = Mock()
         sync_client.extract.return_value = _make_response(
             {"extract_id": "e", "results": [], "errors": []},
@@ -270,19 +270,18 @@ class TestParallelExtractTool:
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelExtractTool()
-            tool._run(urls=["https://example.com"], excerpts=True)
+            tool._run(urls=["https://example.com"])
             advanced = sync_client.extract.call_args.kwargs.get("advanced_settings")
-            # No advanced settings at all when only the bool default is set.
             assert advanced is None
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")
-    def test_excerpts_bool_false_warns(
+    def test_excerpts_bool_now_rejected(
         self,
         mock_async_factory: Mock,
         mock_sync_factory: Mock,
     ) -> None:
-        """excerpts=False emits a DeprecationWarning (v1 always returns excerpts)."""
+        """The legacy `excerpts: bool` form was removed in 0.4.0."""
         sync_client = Mock()
         sync_client.extract.return_value = _make_response(
             {"extract_id": "e", "results": [], "errors": []},
@@ -294,8 +293,15 @@ class TestParallelExtractTool:
             "langchain_parallel.extract_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelExtractTool()
-            with pytest.warns(DeprecationWarning, match="always returns excerpts"):
-                tool._run(urls=["https://example.com"], excerpts=False)
+            # The boolean form was removed in 0.4.0; both True and False now
+            # fail pydantic validation on the typed `Optional[ExcerptSettings]`
+            # field.
+            from pydantic import ValidationError
+
+            with pytest.raises(ValidationError):
+                tool.invoke({"urls": ["https://example.com"], "excerpts": False})
+            with pytest.raises(ValidationError):
+                tool.invoke({"urls": ["https://example.com"], "excerpts": True})
 
     @patch("langchain_parallel.extract_tool.get_parallel_client")
     @patch("langchain_parallel.extract_tool.get_async_parallel_client")

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from langchain_parallel._types import ExcerptSettings, FetchPolicy, SourcePolicy
-from langchain_parallel.search_tool import ParallelWebSearchTool, _normalize_mode
+from langchain_parallel.search_tool import ParallelWebSearchTool, _validate_mode
 
 
 def _make_response(payload: dict) -> SimpleNamespace:
@@ -69,64 +69,25 @@ class TestParallelWebSearchTool:
             assert kwargs["advanced_settings"] == {"max_results": 3}
             assert isinstance(result, dict)
             assert result["search_id"] == "search-1"
-            assert result["search_metadata"]["endpoint"] == "v1"
+            assert "search_duration_seconds" in result["search_metadata"]
 
-    @patch("langchain_parallel.search_tool.get_parallel_client")
-    @patch("langchain_parallel.search_tool.get_async_parallel_client")
-    def test_run_falls_back_to_beta_when_objective_only(
-        self,
-        mock_async_factory: Mock,
-        mock_sync_factory: Mock,
-    ) -> None:
-        """Objective-only routes to /v1beta with a DeprecationWarning.
-
-        This is a deprecated path slated for removal in 0.4.0; it exists so
-        0.2.x callers passing only ``objective`` keep working.
-        """
-        sync_client = Mock()
-        sync_client.beta.search.return_value = _make_response(
-            {"search_id": "beta-1", "results": []},
-        )
-        mock_sync_factory.return_value = sync_client
-        mock_async_factory.return_value = Mock()
-
+    def test_run_requires_search_queries(self) -> None:
+        """The v1beta-fallback path was removed in 0.4.0; missing queries raises now."""
         with patch(
             "langchain_parallel.search_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelWebSearchTool()
-            with pytest.warns(DeprecationWarning, match="0.4.0"):
-                result = tool._run(
-                    objective="What is AI?",
-                    mode="advanced",
-                    source_policy={"include_domains": ["wikipedia.org"]},
-                )
-            sync_client.beta.search.assert_called_once()
-            sync_client.search.assert_not_called()
-            beta_kwargs = sync_client.beta.search.call_args.kwargs
-            # advanced -> agentic on the legacy endpoint
-            assert beta_kwargs["mode"] == "agentic"
-            assert beta_kwargs["source_policy"] == {
-                "include_domains": ["wikipedia.org"],
-            }
-            assert result["search_metadata"]["endpoint"] == "v1beta"
-
-    def test_run_raises_when_neither_objective_nor_queries(self) -> None:
-        """At least one of objective or search_queries must be provided."""
-        with patch(
-            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
-        ):
-            tool = ParallelWebSearchTool()
-            with pytest.raises(ValueError, match="objective.*search_queries.*provided"):
-                tool._run()
+            with pytest.raises(ValueError, match="search_queries is required"):
+                tool._run(search_queries=[], objective="What is AI?")
 
     @patch("langchain_parallel.search_tool.get_parallel_client")
     @patch("langchain_parallel.search_tool.get_async_parallel_client")
-    def test_run_translates_legacy_mode(
+    def test_run_rejects_legacy_mode(
         self,
         mock_async_factory: Mock,
         mock_sync_factory: Mock,
     ) -> None:
-        """Legacy mode strings are mapped with a DeprecationWarning."""
+        """Legacy mode strings now raise (the deprecation shim was removed in 0.4.0)."""
         sync_client = Mock()
         sync_client.search.return_value = _make_response(
             {"search_id": "s", "results": []},
@@ -138,9 +99,8 @@ class TestParallelWebSearchTool:
             "langchain_parallel.search_tool.get_api_key", return_value="test-key"
         ):
             tool = ParallelWebSearchTool()
-            with pytest.warns(DeprecationWarning, match="legacy beta value"):
+            with pytest.raises(ValueError, match="Invalid mode"):
                 tool._run(search_queries=["q"], mode="agentic")
-            assert sync_client.search.call_args.kwargs["mode"] == "advanced"
 
     @patch("langchain_parallel.search_tool.get_parallel_client")
     @patch("langchain_parallel.search_tool.get_async_parallel_client")
@@ -181,7 +141,7 @@ class TestParallelWebSearchTool:
                 },
                 "source_policy": {
                     "include_domains": ["nature.com"],
-                    "after_date": "2025-01-01",
+                    "after_date": __import__("datetime").date(2025, 1, 1),
                 },
                 "max_results": 15,
                 "location": "us",
@@ -331,20 +291,19 @@ def test_parallel_search_tool_is_alias_of_parallel_web_search_tool() -> None:
     assert ParallelSearchTool is ParallelWebSearchTool
 
 
-class TestNormalizeMode:
+class TestValidateMode:
     def test_passthrough(self) -> None:
-        assert _normalize_mode("basic") == "basic"
-        assert _normalize_mode("advanced") == "advanced"
-        assert _normalize_mode(None) is None
+        assert _validate_mode("basic") == "basic"
+        assert _validate_mode("advanced") == "advanced"
+        assert _validate_mode(None) is None
 
-    def test_legacy(self) -> None:
-        with pytest.warns(DeprecationWarning):
-            assert _normalize_mode("one-shot") == "basic"
-        with pytest.warns(DeprecationWarning):
-            assert _normalize_mode("agentic") == "advanced"
-        with pytest.warns(DeprecationWarning):
-            assert _normalize_mode("fast") == "basic"
+    def test_legacy_now_raises(self) -> None:
+        # The DeprecationWarning shim was removed in 0.4.0; legacy mode strings
+        # now raise instead of being mapped.
+        for legacy in ("one-shot", "agentic", "fast"):
+            with pytest.raises(ValueError, match="Invalid mode"):
+                _validate_mode(legacy)
 
     def test_invalid(self) -> None:
         with pytest.raises(ValueError, match="Invalid mode"):
-            _normalize_mode("nonsense")
+            _validate_mode("nonsense")

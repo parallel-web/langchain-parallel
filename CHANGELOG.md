@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-28
+
+This is a feature release covering Phase 2 of the modernization roadmap. Adds five new public surfaces (retriever, Task API, FindAll, Monitor, MCP toolkit) and removes the deprecation paths that 0.3.0 introduced.
+
+### Added
+
+- **`ParallelSearchRetriever`** — `BaseRetriever` returning `list[Document]` with rich `metadata` (`url`, `title`, `publish_date`, `search_id`, `excerpts`, `query`). Drops in to any RAG pipeline. Sync + async.
+- **Task API** (`langchain_parallel.tasks`):
+  - `ParallelTaskRunTool` — agent-callable `BaseTool` that runs a single Parallel Task synchronously via `client.task_run.execute(...)`. Surfaces the structured output, `basis` citations, and run id. Default processor: **`lite-fast`**. Supports the full processor menu (`lite`, `base`, `core`, `core2x`, `pro`, `ultra`, `ultra2x/4x/8x`, plus matching `-fast` variants — 18 total).
+  - `ParallelDeepResearch` — `Runnable[str|dict, dict]` for the single-input deep-research pattern. Default processor: **`pro-fast`** (the `-fast` variant of "Exploratory web research", 2-5x faster than `pro` at similar accuracy). Pass `processor="ultra"` for the most thorough multi-source reports.
+  - `ParallelTaskGroup` — low-level batch primitive: creates a Task Group, fans out runs, collects results. New `task_spec` field forwards as `default_task_spec` to `add_runs`. Default processor: **`lite-fast`**.
+  - `ParallelEnrichment` — `Runnable[list, list]` for the structured-batch enrichment pattern (typed counterpart to `ParallelDeepResearch`). Wraps `ParallelTaskGroup` with a `default_task_spec` built from pydantic input/output schemas; coerces pydantic instances → dicts on input. Default processor: **`core-fast`**.
+
+  All four Task surfaces default to a **`-fast` processor variant** (2-5x faster than the corresponding non-fast tier at similar accuracy per https://docs.parallel.ai/task-api/guides/choose-a-processor). Drop the `-fast` suffix when latency is less of a concern than maximum quality.
+  - `build_task_spec(input_schema=, output_schema=)` helper — accepts pydantic classes, raw JSON-schema dicts, or text descriptions and returns a TaskSpec dict.
+  - `parse_basis(result)` helper — pulls per-field citations, low-confidence field names, and the `interaction_id` out of any Task-surface result dict. Removes the ~30 lines of result-shape walking every confidence-aware consumer would otherwise rewrite.
+  - **BYOMCP support** — pass `mcp_servers=[McpServer(...)]` to `ParallelTaskRunTool` / `ParallelDeepResearch` to expose your own Streamable-HTTP MCP endpoints to the run.
+  - **`previous_interaction_id`** — multi-turn context chaining; both `ParallelTaskRunTool` and `ParallelDeepResearch` accept it and result dicts surface `interaction_id` at the top level for easy chaining.
+  - **Webhook signature verification** — `verify_webhook(payload, *, webhook_id, webhook_timestamp, webhook_signature, secret)` implementing the Standard Webhooks scheme (HMAC-SHA256, base64, `v1,<sig>` format with replay protection) per https://docs.parallel.ai/resources/webhook-setup.
+- **`ParallelFindAllTool`** (`langchain_parallel.findall`) — entity discovery via `client.beta.findall.create` + `result`. Returns ranked candidates that satisfy a natural-language objective and a set of boolean match conditions. Generators: `preview`, `base`, `core`, `pro`. Sync + async.
+- **`ParallelMonitor`** (`langchain_parallel.monitors`) — thin httpx wrapper around `/v1alpha/monitors`. Create / retrieve / update / delete monitors; list event groups; simulate events. The Parallel SDK (0.5.1) does not yet expose this surface, so this module talks to the API directly. The Monitor API is **alpha** and shapes may change without notice.
+
+### Removed
+
+- **`mode="one-shot"` / `"agentic"` / `"fast"`** — the legacy `mode` strings deprecated in 0.3.0 are removed. Use `mode="basic"` (formerly `one-shot`/`fast`) or `mode="advanced"` (formerly `agentic`).
+- **Search `objective`-only call (no `search_queries`)** — the `/v1beta` fallback path deprecated in 0.3.0 is removed. `search_queries` is now a required field on `ParallelWebSearchInput`. Pass at least one keyword query alongside any `objective`.
+- **`Extract.excerpts=False`** — the no-op DeprecationWarning path is removed. The field is now `Optional[ExcerptSettings]` (was `Union[bool, ExcerptSettings]`); pass `ExcerptSettings(max_chars_per_result=…)` to control per-result size, or omit the field for the API default.
+- **`search_metadata["endpoint"]`** key — no longer emitted (the v1beta fallback that introduced it is gone).
+
+### Changed
+
+- Bumped `langchain-core` constraint to `^1.3.0` and locked at 1.3.2 (was 1.1.0 → 1.2.31 in this PR's earlier pass).
+- Refreshed `poetry.lock` against the latest within current pin constraints (rolls in the changes from dependabot PRs #7-#11): `langsmith` 0.4.37 → 0.7.37, `pydantic` 2.12.3 → 2.13.3, `pydantic-core` 2.41.4 → 2.46.3, `requests` 2.32.5 → 2.33.1, `orjson` 3.11.3 → 3.11.8, `pygments` 2.19.2 → 2.20.0, `mypy` 1.18.2 → 1.20.2, plus transitives.
+
+### Tests
+
+- Override `test_serdes` from `langchain-tests` 1.1.6 to handle `langchain-core` 1.2+'s new `allowed_objects=` allowlist on `load()`. The standard test still uses the pre-1.2 `valid_namespaces=` API and rejects partner integrations; our override opts in via `allowed_objects=[ChatParallelWeb]` and `valid_namespaces=["langchain_parallel"]` to keep the full serialize → load → equality round-trip intact. Marked `@pytest.mark.xfail(strict=False)` per `langchain-tests` rules; reports as XPASS. Remove the override once `langchain-tests` is updated for the new allowlist API.
+
+### Migration from 0.3.x
+
+```python
+# 0.3.x (DeprecationWarning, still worked)        # 0.4.x
+tool.invoke({"objective": "..."})                 # tool.invoke({"search_queries": ["..."], "objective": "..."})
+tool.invoke({"mode": "one-shot", ...})            # tool.invoke({"mode": "basic", ...})
+tool.invoke({"mode": "agentic", ...})             # tool.invoke({"mode": "advanced", ...})
+extract_tool.invoke({..., "excerpts": False})     # extract_tool.invoke({...})  # excerpts always returned in v1
+```
+
+The new surfaces are all additive — existing 0.3.x code that was warning-free continues to work without changes.
+
 ## [0.3.0] - 2026-04-27
 
 This release migrates Search and Extract to Parallel's v1 GA endpoints, surfaces citations + structured output on the chat model, and bumps the SDK to `0.5.1`.
