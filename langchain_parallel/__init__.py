@@ -4,10 +4,11 @@ from langchain_parallel._types import (
     ExcerptSettings,
     FetchPolicy,
     FullContentSettings,
+    SourcePolicy,
 )
-from langchain_parallel.chat_models import ChatParallelWeb
+from langchain_parallel.chat_models import ChatParallel, ChatParallelWeb
 from langchain_parallel.extract_tool import ParallelExtractTool
-from langchain_parallel.search_tool import ParallelWebSearchTool
+from langchain_parallel.search_tool import ParallelSearchTool, ParallelWebSearchTool
 
 try:
     __version__ = metadata.version(__package__ or __name__)
@@ -17,11 +18,14 @@ except metadata.PackageNotFoundError:
 del metadata  # optional, avoids polluting the results of dir(__package__)
 
 __all__ = [
+    "ChatParallel",
     "ChatParallelWeb",
     "ExcerptSettings",
     "FetchPolicy",
     "FullContentSettings",
     "ParallelExtractTool",
+    "ParallelSearchTool",
     "ParallelWebSearchTool",
+    "SourcePolicy",
     "__version__",
 ]

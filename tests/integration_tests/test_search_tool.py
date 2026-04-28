@@ -23,6 +23,13 @@ class TestParallelWebSearchToolIntegration(ToolsIntegrationTests):
         have {"name", "id", "args"} keys.
         """
         return {
-            "objective": "What are the latest developments in AI?",
+            "search_queries": [
+                "latest AI developments",
+                "AI breakthroughs 2026",
+            ],
+            "objective": "Latest developments in AI",
             "max_results": 3,
         }
+        # Note: passing only `objective` (no search_queries) also works in
+        # 0.3.x but routes to /v1beta with a DeprecationWarning. Prefer the
+        # GA shape above; the fallback will be removed in 0.4.0.

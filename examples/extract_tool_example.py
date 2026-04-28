@@ -168,11 +168,11 @@ def agent_integration_example() -> None:
     """Example of using extract tool with an agent."""
     print("\n=== Agent Integration Example ===")
 
-    from langchain_parallel import ChatParallelWeb
+    from langchain_parallel import ChatParallel
 
     # Initialize tools
     extract_tool = ParallelExtractTool(max_chars_per_extract=3000)
-    chat = ChatParallelWeb()
+    chat = ChatParallel()
 
     # Extract content
     print("\nExtracting content from URLs...")
