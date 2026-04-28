@@ -25,7 +25,6 @@ This is a feature release covering Phase 2 of the modernization roadmap. Adds fi
   - **Webhook signature verification** — `verify_webhook(payload, *, webhook_id, webhook_timestamp, webhook_signature, secret)` implementing the Standard Webhooks scheme (HMAC-SHA256, base64, `v1,<sig>` format with replay protection) per https://docs.parallel.ai/resources/webhook-setup.
 - **`ParallelFindAllTool`** (`langchain_parallel.findall`) — entity discovery via `client.beta.findall.create` + `result`. Returns ranked candidates that satisfy a natural-language objective and a set of boolean match conditions. Generators: `preview`, `base`, `core`, `pro`. Sync + async.
 - **`ParallelMonitor`** (`langchain_parallel.monitors`) — thin httpx wrapper around `/v1alpha/monitors`. Create / retrieve / update / delete monitors; list event groups; simulate events. The Parallel SDK (0.5.1) does not yet expose this surface, so this module talks to the API directly. The Monitor API is **alpha** and shapes may change without notice.
-- **`parallel_mcp_toolkit()`** (`langchain_parallel.mcp`) — factory that returns Parallel's hosted Search MCP and Task MCP tools as LangChain `BaseTool`s, via the optional `langchain-mcp-adapters` dependency. Install with `pip install "langchain-parallel[mcp]"`. Useful when you want to mix Parallel tools with other MCP servers in the same agent runtime.
 
 ### Removed
 
@@ -36,7 +35,6 @@ This is a feature release covering Phase 2 of the modernization roadmap. Adds fi
 
 ### Changed
 
-- `pyproject.toml`: added optional extra `[mcp]` pulling in `langchain-mcp-adapters` for the MCP toolkit.
 - Refreshed `poetry.lock` against the latest within current pin constraints (rolls in the changes from dependabot PRs #7-#11): `langchain-core` 1.1.0 → 1.2.31, `langsmith` 0.4.37 → 0.7.37, `pydantic` 2.12.3 → 2.13.3, `pydantic-core` 2.41.4 → 2.46.3, `requests` 2.32.5 → 2.33.1, `orjson` 3.11.3 → 3.11.8, `mypy` 1.18.2 → 1.20.2, plus transitives.
 
 ### Tests

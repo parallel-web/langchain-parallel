@@ -16,7 +16,6 @@ This package provides LangChain integrations for [Parallel](https://docs.paralle
 | Structured-batch enrichment | [`ParallelEnrichment`](#task-api) | `/v1beta/tasks/groups` + TaskSpec |
 | Entity discovery | [`ParallelFindAllTool`](#findall-api) | `/v1beta/findall` |
 | Scheduled web monitors | [`ParallelMonitor`](#monitor-api-alpha) | `/v1alpha/monitors` |
-| Hosted MCP servers as LangChain tools | [`parallel_mcp_toolkit()`](#mcp-toolkit) | `search.parallel.ai` + `task-mcp.parallel.ai` |
 | Webhook signature verification | [`verify_webhook()`](#webhook-signature-verification) | HMAC-SHA256 |
 
 > Old names (`ChatParallelWeb`, `ParallelWebSearchTool`) continue to work as aliases for `ChatParallel` and `ParallelSearchTool`.
@@ -623,22 +622,6 @@ async def webhook(request):
     if not verify_webhook(body, signature, secret="..."):
         return Response(status_code=401)
     # ... process the event
-```
-
-## MCP toolkit
-
-Wrap Parallel's hosted MCP servers (Search MCP + Task MCP) as LangChain `BaseTool`s. Useful when you want to mix Parallel tools with other MCP servers in the same agent runtime, or when you've standardized on MCP for cross-language reasons. For Python-only use cases, the native tools above are simpler and don't require the extra dependency.
-
-```bash
-pip install "langchain-parallel[mcp]"  # pulls in langchain-mcp-adapters
-```
-
-```python
-from langchain_parallel import parallel_mcp_toolkit
-
-tools = await parallel_mcp_toolkit()  # returns list[BaseTool]
-# Includes: web_search, web_fetch (Search MCP);
-#           createDeepResearch, createTaskGroup, getStatus, getResultMarkdown (Task MCP)
 ```
 
 ## Error Handling

@@ -13,7 +13,6 @@ from langchain_parallel.findall import (
     FindAllMatchCondition,
     ParallelFindAllTool,
 )
-from langchain_parallel.mcp import parallel_mcp_toolkit
 from langchain_parallel.monitors import MonitorWebhook, ParallelMonitor
 from langchain_parallel.retrievers import ParallelSearchRetriever
 from langchain_parallel.search_tool import ParallelSearchTool, ParallelWebSearchTool
@@ -57,6 +56,5 @@ __all__ = [
     "SourcePolicy",
     "__version__",
     "build_task_spec",
-    "parallel_mcp_toolkit",
     "verify_webhook",
 ]
