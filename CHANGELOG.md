@@ -35,6 +35,11 @@ This is a feature release covering Phase 2 of the modernization roadmap. Adds fi
 ### Changed
 
 - `pyproject.toml`: added optional extra `[mcp]` pulling in `langchain-mcp-adapters` for the MCP toolkit.
+- Refreshed `poetry.lock` against the latest within current pin constraints (rolls in the changes from dependabot PRs #7-#11): `langchain-core` 1.1.0 → 1.2.31, `langsmith` 0.4.37 → 0.7.37, `pydantic` 2.12.3 → 2.13.3, `pydantic-core` 2.41.4 → 2.46.3, `requests` 2.32.5 → 2.33.1, `orjson` 3.11.3 → 3.11.8, `mypy` 1.18.2 → 1.20.2, plus transitives.
+
+### Tests
+
+- Override `test_serdes` from `langchain-tests` 1.1.6 to handle `langchain-core` 1.2+'s new `allowed_objects=` allowlist on `load()`. The standard test still uses the pre-1.2 `valid_namespaces=` API and rejects partner integrations; our override opts in via `allowed_objects=[ChatParallelWeb]` and `valid_namespaces=["langchain_parallel"]` to keep the full serialize → load → equality round-trip intact. Marked `@pytest.mark.xfail(strict=False)` per `langchain-tests` rules; reports as XPASS. Remove the override once `langchain-tests` is updated for the new allowlist API.
 
 ### Migration from 0.3.x
 

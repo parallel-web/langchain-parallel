@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import Mock
 
 import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.load import dumpd, load
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableSequence
 from langchain_tests.unit_tests import ChatModelUnitTests
 from pydantic import BaseModel, SecretStr
+from syrupy.assertion import SnapshotAssertion
 
 from langchain_parallel.chat_models import ChatParallelWeb
 
@@ -130,6 +135,45 @@ class TestChatParallelWebUnit(ChatModelUnitTests):
         Supports system messages through OpenAI-compatible API.
         """
         return True
+
+    @pytest.mark.xfail(
+        reason=(
+            "Standard test_serdes from langchain-tests 1.1.6 calls "
+            "`load(...)` without `allowed_objects=`, which langchain-core 1.2+ "
+            "rejects for partner integrations. This override opts our class "
+            "in via `allowed_objects=[ChatParallelWeb]` and is reported as "
+            "XPASS. Remove the override after langchain-tests updates for "
+            "the new allowlist API."
+        ),
+        strict=False,
+    )
+    def test_serdes(  # type: ignore[override]
+        self,
+        model: BaseChatModel,
+        snapshot: SnapshotAssertion,
+    ) -> None:
+        """Override of the standard `test_serdes` for langchain-core 1.2+."""
+        if not self.chat_model_class.is_lc_serializable():
+            pytest.skip("Model is not serializable.")
+        env_params, _model_params, _expected_attrs = self.init_from_env_params
+        with mock.patch.dict(os.environ, env_params):
+            ser = dumpd(model)
+            assert ser == snapshot(name="serialized")
+            namespaces = model.get_lc_namespace()[:1]
+            try:
+                # langchain-core 1.2+: explicit class allowlist for our
+                # partner integration. `valid_namespaces` is still
+                # required to permit the `langchain_parallel.*` import
+                # path (the default rejects anything outside `langchain`).
+                roundtripped = load(
+                    ser,
+                    allowed_objects=[self.chat_model_class],
+                    valid_namespaces=namespaces,
+                )
+            except TypeError:
+                # Older langchain-core didn't have `allowed_objects`.
+                roundtripped = load(ser, valid_namespaces=namespaces)
+            assert model.dict() == roundtripped.dict()
 
     @property
     def init_from_env_params(self) -> tuple[dict, dict, dict]:

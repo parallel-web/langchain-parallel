@@ -13,6 +13,7 @@ This package provides LangChain integrations for [Parallel](https://docs.paralle
 | Single Task Run + citations | [`ParallelTaskRunTool`](#task-api) | `/v1/tasks/runs` |
 | Deep-research Runnable | [`ParallelDeepResearch`](#task-api) | `/v1/tasks/runs` |
 | Bulk task batching | [`ParallelTaskGroup`](#task-api) | `/v1beta/tasks/groups` |
+| Structured-batch enrichment | [`ParallelEnrichment`](#task-api) | `/v1beta/tasks/groups` + TaskSpec |
 | Entity discovery | [`ParallelFindAllTool`](#findall-api) | `/v1beta/findall` |
 | Scheduled web monitors | [`ParallelMonitor`](#monitor-api-alpha) | `/v1alpha/monitors` |
 | Hosted MCP servers as LangChain tools | [`parallel_mcp_toolkit()`](#mcp-toolkit) | `search.parallel.ai` + `task-mcp.parallel.ai` |
