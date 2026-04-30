@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "langchain-parallel"
-version = "0.4.0"
+version = "0.4.1"
 description = "A LangChain integration for Parallel Web AI services, including Chat and Search."
 authors = ["Parallel Team <support@parallel.ai>"]
 readme = "README.md"

@@ -14,7 +14,7 @@ from parallel import AsyncParallel, Parallel
 from pydantic import Field, SecretStr, model_validator
 
 from ._client import get_api_key, get_async_parallel_client, get_parallel_client
-from ._types import ExcerptSettings, FetchPolicy, SourcePolicy
+from .types import ExcerptSettings, FetchPolicy, SourcePolicy
 
 
 def _join_excerpts(excerpts: Optional[list[str]]) -> str:

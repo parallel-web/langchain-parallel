@@ -1,11 +1,5 @@
 from importlib import metadata
 
-from langchain_parallel._types import (
-    ExcerptSettings,
-    FetchPolicy,
-    FullContentSettings,
-    SourcePolicy,
-)
 from langchain_parallel.chat_models import ChatParallel, ChatParallelWeb
 from langchain_parallel.extract_tool import ParallelExtractTool
 from langchain_parallel.findall import (
@@ -25,6 +19,12 @@ from langchain_parallel.tasks import (
     build_task_spec,
     parse_basis,
     verify_webhook,
+)
+from langchain_parallel.types import (
+    ExcerptSettings,
+    FetchPolicy,
+    FullContentSettings,
+    SourcePolicy,
 )
 
 try:

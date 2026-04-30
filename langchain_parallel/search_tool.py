@@ -14,7 +14,7 @@ from parallel import AsyncParallel, Parallel
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from ._client import get_api_key, get_async_parallel_client, get_parallel_client
-from ._types import ExcerptSettings, FetchPolicy, SourcePolicy
+from .types import ExcerptSettings, FetchPolicy, SourcePolicy
 
 _VALID_MODES = {"basic", "advanced"}
 
@@ -180,7 +180,7 @@ class ParallelWebSearchInput(BaseModel):
     )
 
 
-class ParallelWebSearchTool(BaseTool):
+class ParallelSearchTool(BaseTool):
     """Parallel Search tool with web research capabilities.
 
     This tool calls Parallel's Search API, which streamlines the traditional
@@ -206,9 +206,9 @@ class ParallelWebSearchTool(BaseTool):
 
     Instantiation:
         ```python
-        from langchain_parallel import ParallelWebSearchTool
+        from langchain_parallel import ParallelSearchTool
 
-        tool = ParallelWebSearchTool()
+        tool = ParallelSearchTool()
         ```
 
     Invocation:
@@ -292,7 +292,7 @@ class ParallelWebSearchTool(BaseTool):
     """Asynchronous Parallel SDK client (initialized after validation)."""
 
     @model_validator(mode="after")
-    def validate_environment(self) -> ParallelWebSearchTool:
+    def validate_environment(self) -> ParallelSearchTool:
         """Validate the environment and initialize SDK clients."""
         api_key_str = get_api_key(
             self.api_key.get_secret_value() if self.api_key else None,
@@ -534,8 +534,8 @@ class ParallelWebSearchTool(BaseTool):
         return response
 
 
-#: Forward-compat alias for :class:`ParallelWebSearchTool`.
+#: Back-compat alias for :class:`ParallelSearchTool`.
 #:
-#: Prefer ParallelSearchTool in new code; ParallelWebSearchTool will
-#: continue to work indefinitely as an alias for this class.
-ParallelSearchTool = ParallelWebSearchTool
+#: ``ParallelWebSearchTool`` is the legacy class name and continues to
+#: work indefinitely; new code should prefer ``ParallelSearchTool``.
+ParallelWebSearchTool = ParallelSearchTool

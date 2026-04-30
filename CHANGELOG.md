@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-29
+
+Documentation discoverability fixes — no API changes for end users. The reference docs at `reference.langchain.com/python/langchain-parallel` were rendering pages under the legacy class names (`ChatParallelWeb`, `ParallelWebSearchTool`) and at private module paths (`_types`, `_client`); this release reorganizes the source so the auto-generated reference matches the canonical names used in user-facing docs.
+
+### Changed
+
+- **Canonical class definitions flipped.** `ChatParallel` is now the actual class definition; `ChatParallelWeb` is a back-compat alias (`ChatParallelWeb = ChatParallel`). Same flip for `ParallelSearchTool` / `ParallelWebSearchTool`. Both old and new names continue to import and `isinstance(x, ChatParallelWeb)` continues to work — they're the same class object.
+- **`langchain_parallel._types` → `langchain_parallel.types`.** The settings classes (`ExcerptSettings`, `FetchPolicy`, `FullContentSettings`, `SourcePolicy`) now live at the public `types` module path; `_types` remains as a re-export shim so any code importing from the old path keeps working.
+- **`langchain_parallel._client`** declares `__all__: list[str] = []` and a "private module" docstring so reference-doc tooling treats it as internal. No public API change — these helpers were never exported from the package root.
+
+### Migration
+
+No code changes required. The two flipped classes and the renamed settings module are fully backward compatible:
+
+- `from langchain_parallel import ChatParallelWeb` and `from langchain_parallel import ChatParallel` both work and resolve to the same class.
+- `from langchain_parallel import ParallelWebSearchTool` and `from langchain_parallel import ParallelSearchTool` both work and resolve to the same class.
+- `from langchain_parallel._types import ExcerptSettings` continues to work via the back-compat shim; new code should prefer `from langchain_parallel.types import ExcerptSettings` (or the package root: `from langchain_parallel import ExcerptSettings`).
+
 ## [0.4.0] - 2026-04-28
 
 This is a feature release covering Phase 2 of the modernization roadmap. Adds five new public surfaces (retriever, Task API, FindAll, Monitor, MCP toolkit) and removes the deprecation paths that 0.3.0 introduced.

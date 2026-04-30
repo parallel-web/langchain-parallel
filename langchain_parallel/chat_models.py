@@ -1,6 +1,6 @@
-"""Parallel Web chat model integration.
+"""ChatParallel chat model integration.
 
-This module provides the ChatParallelWeb class for interacting with Parallel's
+This module provides the ChatParallel class for interacting with Parallel's
 Chat API through an OpenAI-compatible interface.
 """
 
@@ -165,8 +165,8 @@ def _merge_consecutive_messages(messages: list[BaseMessage]) -> list[BaseMessage
     return merged
 
 
-class ChatParallelWeb(BaseChatModel):
-    """Parallel Web chat model integration.
+class ChatParallel(BaseChatModel):
+    """ChatParallel chat model integration.
 
     This integration connects to Parallel's Chat API, which provides
     real-time web research capabilities through an OpenAI-compatible interface.
@@ -201,9 +201,9 @@ class ChatParallelWeb(BaseChatModel):
 
     Instantiate:
         ```python
-        from langchain_parallel import ChatParallelWeb
+        from langchain_parallel import ChatParallel
 
-        llm = ChatParallelWeb(
+        llm = ChatParallel(
             model="speed",
             temperature=0.7,
             max_tokens=None,
@@ -664,7 +664,7 @@ class ChatParallelWeb(BaseChatModel):
                 f"Structured output requires one of the research models "
                 f"({sorted(_STRUCTURED_OUTPUT_MODELS)}); the '{self.model}' "
                 f"model silently ignores response_format. Re-instantiate with "
-                f"`ChatParallelWeb(model='lite' | 'base' | 'core')`."
+                f"`ChatParallel(model='lite' | 'base' | 'core')`."
             )
             raise ValueError(msg)
         if method == "function_calling":
@@ -734,8 +734,8 @@ class ChatParallelWeb(BaseChatModel):
         return bound | output_parser
 
 
-#: Forward-compat alias for :class:`ChatParallelWeb`.
+#: Back-compat alias for :class:`ChatParallel`.
 #:
-#: Prefer ChatParallel in new code; ChatParallelWeb will continue to
-#: work indefinitely as an alias for this class.
-ChatParallel = ChatParallelWeb
+#: ``ChatParallelWeb`` is the legacy class name and continues to work
+#: indefinitely; new code should prefer ``ChatParallel``.
+ChatParallelWeb = ChatParallel

@@ -13,7 +13,7 @@ from parallel import AsyncParallel, Parallel
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
 from ._client import get_api_key, get_async_parallel_client, get_parallel_client
-from ._types import ExcerptSettings, FetchPolicy, FullContentSettings
+from .types import ExcerptSettings, FetchPolicy, FullContentSettings
 
 
 def _coerce_full_content(

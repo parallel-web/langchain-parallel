@@ -1,4 +1,8 @@
-"""Client utilities for Parallel integration."""
+"""Internal client utilities for Parallel integration.
+
+Private module. Helpers in here are not part of the public API and may
+change without notice; import from :mod:`langchain_parallel` instead.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,8 @@ from typing import Optional
 
 import openai
 from parallel import AsyncParallel, Parallel
+
+__all__: list[str] = []
 
 
 def get_api_key(api_key: Optional[str] = None) -> str:

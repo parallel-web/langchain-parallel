@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from langchain_parallel._types import ExcerptSettings, FetchPolicy, FullContentSettings
 from langchain_parallel.extract_tool import ParallelExtractTool
+from langchain_parallel.types import ExcerptSettings, FetchPolicy, FullContentSettings
 
 
 def _make_response(payload: dict) -> SimpleNamespace:

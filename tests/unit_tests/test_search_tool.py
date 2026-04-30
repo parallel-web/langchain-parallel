@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from langchain_parallel._types import ExcerptSettings, FetchPolicy, SourcePolicy
 from langchain_parallel.search_tool import ParallelWebSearchTool, _validate_mode
+from langchain_parallel.types import ExcerptSettings, FetchPolicy, SourcePolicy
 
 
 def _make_response(payload: dict) -> SimpleNamespace:
