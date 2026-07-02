@@ -16,15 +16,15 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 from ._client import get_api_key, get_async_parallel_client, get_parallel_client
 from ._types import ExcerptSettings, FetchPolicy, SourcePolicy
 
-_VALID_MODES = {"basic", "advanced"}
+_VALID_MODES = {"turbo", "basic", "advanced"}
 
 
 def _validate_mode(mode: Optional[str]) -> Optional[str]:
-    """Validate that ``mode`` is ``"basic"``, ``"advanced"``, or ``None``."""
+    """Validate that ``mode`` is ``"turbo"``, ``"basic"``, ``"advanced"``, or ``None``."""
     if mode is None or mode in _VALID_MODES:
         return mode
     msg = (
-        f"Invalid mode '{mode}'. Expected one of: 'basic', 'advanced'. "
+        f"Invalid mode '{mode}'. Expected one of: 'turbo', 'basic', 'advanced'. "
         f"(Legacy values 'fast', 'one-shot', 'agentic' were removed in 0.4.0; "
         f"map 'fast'/'one-shot' to 'basic' and 'agentic' to 'advanced'.)"
     )
@@ -122,11 +122,12 @@ class ParallelWebSearchInput(BaseModel):
             "Useful for capping context size when feeding results to an LLM."
         ),
     )
-    mode: Optional[Literal["basic", "advanced"]] = Field(
+    mode: Optional[Literal["turbo", "basic", "advanced"]] = Field(
         default=None,
         description=(
-            "Search mode: 'basic' for low-latency searches, 'advanced' (default) "
-            "for higher quality with more retrieval and compression."
+            "Search mode: 'turbo' for the lowest latency and cost, 'basic' for "
+            "low-latency searches, 'advanced' (default) for higher quality "
+            "with more retrieval and compression."
         ),
     )
     source_policy: Optional[Union[SourcePolicy, dict[str, Any]]] = Field(
@@ -185,8 +186,8 @@ class ParallelWebSearchTool(BaseTool):
 
     This tool calls Parallel's Search API, which streamlines the traditional
     search -> scrape -> extract pipeline into a single API call. It supports
-    natural-language objectives, keyword queries, domain filters, two modes
-    (`basic`, `advanced`), location targeting, and async usage.
+    natural-language objectives, keyword queries, domain filters, three modes
+    (`turbo`, `basic`, `advanced`), location targeting, and async usage.
 
     Setup:
         Install `langchain-parallel` and set environment variable
