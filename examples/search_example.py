@@ -287,7 +287,7 @@ async def main() -> None:
         print("  - Multi-query search")
         print("  - Domain filtering with SourcePolicy")
         print("  - FetchPolicy for cache control")
-        print("  - Search modes: basic (low-latency) and advanced (high-quality)")
+        print("  - Search modes: turbo (fastest/cheapest), basic (low-latency), advanced (high-quality)")
         print("  - Async + parallel execution")
         print("  - Metadata collection")
 

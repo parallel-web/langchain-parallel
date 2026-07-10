@@ -293,6 +293,7 @@ def test_parallel_search_tool_is_alias_of_parallel_web_search_tool() -> None:
 
 class TestValidateMode:
     def test_passthrough(self) -> None:
+        assert _validate_mode("turbo") == "turbo"
         assert _validate_mode("basic") == "basic"
         assert _validate_mode("advanced") == "advanced"
         assert _validate_mode(None) is None

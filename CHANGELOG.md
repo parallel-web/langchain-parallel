@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-13
+
+This release adds support for Parallel Search **Turbo** mode.
+
+### Added
+
+- **`turbo` search mode** — `ParallelWebSearchTool` now accepts `mode="turbo"`, the lowest-latency and lowest-cost tier (Parallel Search Turbo, ~200ms p50). Valid modes are now `turbo`, `basic`, and `advanced` (default `advanced`).
+
 ## [0.4.0] - 2026-04-28
 
 This is a feature release covering Phase 2 of the modernization roadmap. Adds five new public surfaces (retriever, Task API, FindAll, Monitor, MCP toolkit) and removes the deprecation paths that 0.3.0 introduced.
