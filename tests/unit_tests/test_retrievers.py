@@ -127,3 +127,22 @@ def test_api_error_wrapped(
         retriever = ParallelSearchRetriever()
         with pytest.raises(ValueError, match="Error calling Parallel Search API"):
             retriever.invoke("q")
+
+
+@pytest.mark.parametrize("mode", ["turbo", "fast", "basic", "advanced"])
+@patch("langchain_parallel.retrievers.get_parallel_client")
+@patch("langchain_parallel.retrievers.get_async_parallel_client")
+def test_every_search_mode_is_forwarded(
+    mock_async_factory: Mock,
+    mock_sync_factory: Mock,
+    mode: str,
+) -> None:
+    sync_client = Mock()
+    sync_client.search.return_value = _resp({"search_id": "s", "results": []})
+    mock_sync_factory.return_value = sync_client
+    mock_async_factory.return_value = Mock()
+
+    with patch("langchain_parallel.retrievers.get_api_key", return_value="k"):
+        ParallelSearchRetriever(mode=mode).invoke("q")
+
+    assert sync_client.search.call_args.kwargs["mode"] == mode
