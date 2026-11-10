@@ -71,6 +71,28 @@ class TestParallelWebSearchTool:
             assert result["search_id"] == "search-1"
             assert "search_duration_seconds" in result["search_metadata"]
 
+    @patch("langchain_parallel.search_tool.get_parallel_client")
+    @patch("langchain_parallel.search_tool.get_async_parallel_client")
+    def test_run_forwards_fast_mode_unchanged(
+        self,
+        mock_async_factory: Mock,
+        mock_sync_factory: Mock,
+    ) -> None:
+        """mode="fast" is the current Search API mode and reaches the SDK as-is."""
+        sync_client = Mock()
+        sync_client.search.return_value = _make_response(
+            {"search_id": "s", "results": []},
+        )
+        mock_sync_factory.return_value = sync_client
+        mock_async_factory.return_value = Mock()
+
+        with patch(
+            "langchain_parallel.search_tool.get_api_key", return_value="test-key"
+        ):
+            tool = ParallelWebSearchTool()
+            tool._run(search_queries=["q"], mode="fast")
+            assert sync_client.search.call_args.kwargs["mode"] == "fast"
+
     def test_run_requires_search_queries(self) -> None:
         """The v1beta-fallback path was removed in 0.4.0; missing queries raises now."""
         with patch(
@@ -294,16 +316,23 @@ def test_parallel_search_tool_is_alias_of_parallel_web_search_tool() -> None:
 class TestValidateMode:
     def test_passthrough(self) -> None:
         assert _validate_mode("turbo") == "turbo"
+        assert _validate_mode("fast") == "fast"
         assert _validate_mode("basic") == "basic"
         assert _validate_mode("advanced") == "advanced"
         assert _validate_mode(None) is None
 
     def test_legacy_now_raises(self) -> None:
         # The DeprecationWarning shim was removed in 0.4.0; legacy mode strings
-        # now raise instead of being mapped.
-        for legacy in ("one-shot", "agentic", "fast"):
+        # now raise instead of being mapped. "fast" is not in this list: it is a
+        # current Search API mode again (Parallel Search Fast).
+        for legacy in ("one-shot", "agentic"):
             with pytest.raises(ValueError, match="Invalid mode"):
                 _validate_mode(legacy)
+
+    def test_fast_is_not_mapped_to_basic(self) -> None:
+        # Before 0.4.0, "fast" was an alias that the client rewrote to "basic".
+        # It must now reach the API unchanged.
+        assert _validate_mode("fast") == "fast"
 
     def test_invalid(self) -> None:
         with pytest.raises(ValueError, match="Invalid mode"):

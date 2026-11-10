@@ -226,7 +226,7 @@ for r in result["results"]:
 | `max_results` | `int` | `10` | Maximum results to return (1–40). |
 | `excerpts` | `Optional[ExcerptSettings]` | `None` | Per-result excerpt-size cap. |
 | `max_chars_total` | `Optional[int]` | `None` | Cap on total excerpt characters across all results. |
-| `mode` | `Optional[Literal["basic", "advanced"]]` | `None` (API default `advanced`) | `basic` is lower-latency; `advanced` is higher quality with more retrieval and compression. Legacy values `fast`, `one-shot` (→ `basic`) and `agentic` (→ `advanced`) are accepted with a `DeprecationWarning`. |
+| `mode` | `Optional[Literal["turbo", "fast", "basic", "advanced"]]` | `None` (API default `advanced`) | `turbo` is the lowest latency and cost; `fast` returns high-quality results within about a second and suits most agents; `basic` is low-latency with extended snippets; `advanced` is higher quality with more retrieval and compression. `fast` is the current Search API mode, not the pre-0.4.0 alias for `basic`. The legacy values `one-shot` and `agentic` were removed in 0.4.0. |
 | `source_policy` | `Optional[SourcePolicy]` | `None` | Domain include/exclude lists and freshness floor (`after_date`). |
 | `fetch_policy` | `Optional[FetchPolicy]` | `None` | Cache vs live-fetch policy (e.g. `FetchPolicy(max_age_seconds=86400, timeout_seconds=60)`). |
 | `location` | `Optional[str]` | `None` | ISO 3166-1 alpha-2 country code (e.g. `"us"`, `"gb"`). |

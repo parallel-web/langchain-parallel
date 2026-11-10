@@ -62,8 +62,9 @@ class ParallelSearchRetriever(BaseRetriever):
             Defaults to "https://api.parallel.ai".
         max_results: int
             Maximum results returned per query. 1-40 (default 5).
-        mode: Optional[Literal["basic", "advanced"]]
-            Search mode; defaults to the API default ("advanced").
+        mode: Optional[str]
+            Search mode: "turbo", "fast", "basic" or "advanced". Defaults to
+            the API default ("advanced").
         objective: Optional[str]
             Objective forwarded to the Search API on every call. Useful
             when the same retriever is used for a focused research task
@@ -101,7 +102,7 @@ class ParallelSearchRetriever(BaseRetriever):
     """Number of results per query (1-40)."""
 
     mode: Optional[str] = Field(default=None)
-    """``"basic"`` or ``"advanced"``."""
+    """``"turbo"``, ``"fast"``, ``"basic"`` or ``"advanced"``. Forwarded as-is."""
 
     objective: Optional[str] = Field(default=None)
     """Optional persistent objective forwarded on every call."""

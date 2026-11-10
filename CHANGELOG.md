@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`fast` search mode** — `ParallelWebSearchTool` now accepts `mode="fast"` (Parallel Search Fast: high-quality results within about a second, $1 per 1,000 requests, and the mode Parallel's docs recommend for most agents). Valid modes are now `turbo`, `fast`, `basic`, and `advanced` (default `advanced`).
+
+### Changed
+
+- `fast` is no longer treated as a removed legacy value. Before 0.4.0, `fast` was an alias that the client rewrote to `basic`; the Search API now uses the name for its own mode, so the value is forwarded unchanged. `one-shot` and `agentic` are still rejected.
+- `ParallelSearchRetriever` already forwarded any `mode` string; its docs now list all four modes.
+- README: the `mode` row described the 0.3.x deprecation shim, which was removed in 0.4.0. It now lists the current modes.
+
+### Note for 0.3.x users
+
+On 0.3.x, `mode="fast"` is still rewritten to `basic`, which costs $5 per 1,000 requests instead of $1. Upgrade to get Parallel Search Fast.
+
 ## [0.5.0] - 2026-07-13
 
 This release adds support for Parallel Search **Turbo** mode.
